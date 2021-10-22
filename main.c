@@ -21,6 +21,8 @@
 #define WMU_AUTO_COLUMN_SIZE   WM_USER + 4
 #define WMU_RESET_CACHE        WM_USER + 5
 #define WMU_SET_FONT           WM_USER + 6
+#define WMU_UPDATE_TEXT        WM_USER + 7
+#define WMU_UPDATE_HIGHLIGHT   WM_USER + 8
 
 #define IDC_MAIN               100
 #define IDC_TREE               101
@@ -35,18 +37,20 @@
 #define IDM_COPY_TEXT          5002
 #define IDM_SELECTALL          5003
 
-#define IDH_EXIT               6000
-#define IDH_NEXT               6001
-#define IDH_PREV               6002
-
 #define SB_CHILD_NO            0
 #define SB_TYPE                1
 #define SB_ROW_COUNT           2
 #define SB_CURRENT_ROW         3
 
+#define SPLITTER_WIDTH         5
 #define MAX_LENGTH             4096
 #define MAX_HIGHLIGHT_LENGTH   64000
-#define APP_NAME               TEXT("json-wlx")
+#define APP_NAME               TEXT("jsontab")
+
+#define LCS_FINDFIRST          1
+#define LCS_MATCHCASE          2
+#define LCS_WHOLEWORDS         4
+#define LCS_BACKWARDS          8
 
 typedef struct {
 	int size;
@@ -60,11 +64,13 @@ static TCHAR iniPath[MAX_PATH] = {0};
 LRESULT CALLBACK cbNewMain (HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK cbNewFilterEdit(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK cbNewText(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 char* json_value_get_as_string(const JSON_Value* val);
 BOOL addNode(HWND hTreeWnd, HTREEITEM hParentItem, JSON_Value* val);
 int highlightBlock(HWND hWnd, TCHAR* text, int start);
 void setStoredValue(TCHAR* name, int value);
 int getStoredValue(TCHAR* name, int defValue);
+TCHAR* getStoredString(TCHAR* name, TCHAR* defValue);
 int CALLBACK cbEnumTabStopChildren (HWND hWnd, LPARAM lParam);
 TCHAR* utf8to16(const char* in);
 char* utf16to8(const TCHAR* in);
@@ -73,6 +79,7 @@ BOOL isNumber(TCHAR* val);
 BOOL isUtf8(const char * string);
 HTREEITEM TreeView_AddItem (HWND hTreeWnd, TCHAR* caption, HTREEITEM parent, LPARAM lParam);
 int TreeView_GetItemText(HWND hTreeWnd, HTREEITEM hItem, TCHAR* buf, int maxLen);
+LPARAM TreeView_GetItemParam(HWND hTreeWnd, HTREEITEM hItem);
 int TreeView_SetItemText(HWND hTreeWnd, HTREEITEM hItem, TCHAR* text);
 int ListView_AddColumn(HWND hListWnd, TCHAR* colName);
 int Header_GetItemText(HWND hWnd, int i, TCHAR* pszText, int cchTextMax);
@@ -90,6 +97,37 @@ void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps) {
 		DWORD size = MultiByteToWideChar(CP_ACP, 0, dps->DefaultIniName, -1, NULL, 0);
 		MultiByteToWideChar(CP_ACP, 0, dps->DefaultIniName, -1, iniPath, size);
 	}
+}
+
+int __stdcall ListSearchText(HWND hWnd, char* searchString, int searchParameter) {
+	HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
+	HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
+
+	DWORD len = MultiByteToWideChar(CP_ACP, 0, searchString, -1, NULL, 0);
+	TCHAR* searchString16 = (TCHAR*)calloc (len, sizeof (TCHAR));
+	MultiByteToWideChar(CP_ACP, 0, searchString, -1, searchString16, len);
+	
+	int spos = SendMessage(hTextWnd, EM_GETSEL, 0, 0);
+	int mode = 0;	
+	FINDTEXTEXW ft = {{HIWORD(spos), -1}, searchString16, {0, 0}};
+	if (searchParameter & LCS_MATCHCASE)
+		mode |= FR_MATCHCASE;
+	if (searchParameter & LCS_WHOLEWORDS)
+		mode |= FR_WHOLEWORD;
+	if (!(searchParameter & LCS_BACKWARDS)) 
+		mode |= FR_DOWN;
+	else 
+		ft.chrg.cpMin  = ft.chrg.cpMin > len ? ft.chrg.cpMin - len : ft.chrg.cpMin;
+
+	int pos = SendMessage(hTextWnd, EM_FINDTEXTEXW, mode, (LPARAM)&ft);	
+	if (pos != -1) 
+		SendMessage(hTextWnd, EM_SETSEL, pos, pos + _tcslen(searchString16));
+	else	
+		MessageBeep(0);
+	free(searchString16);	
+	SetFocus(hTextWnd);		
+	
+	return 0;
 }
 
 HWND APIENTRY ListLoad (HWND hListerWnd, char* fileToLoad, int showFlags) {
@@ -161,13 +199,16 @@ HWND APIENTRY ListLoad (HWND hListerWnd, char* fileToLoad, int showFlags) {
 	SetProp(hMainWnd, TEXT("TOTALROWCOUNT"), calloc(1, sizeof(int)));
 	SetProp(hMainWnd, TEXT("ORDERBY"), calloc(1, sizeof(int)));
 	SetProp(hMainWnd, TEXT("COLNO"), calloc(1, sizeof(int)));
-	SetProp(hMainWnd, TEXT("SPLITTERWIDTH"), calloc(1, sizeof(int)));
+	SetProp(hMainWnd, TEXT("SPLITTERPOSITION"), calloc(1, sizeof(int)));
 	SetProp(hMainWnd, TEXT("FONT"), 0);
+	SetProp(hMainWnd, TEXT("FONTFAMILY"), getStoredString(TEXT("font"), TEXT("Arial")));	
 	SetProp(hMainWnd, TEXT("FONTSIZE"), calloc(1, sizeof(int)));
 	SetProp(hMainWnd, TEXT("GRAYBRUSH"), CreateSolidBrush(GetSysColor(COLOR_BTNFACE)));
+	SetProp(hMainWnd, TEXT("MAXHIGHLIGHTLENGTH"), calloc(1, sizeof(int)));	
 
-	*(int*)GetProp(hMainWnd, TEXT("SPLITTERWIDTH")) = getStoredValue(TEXT("splitter-width"), 200);
+	*(int*)GetProp(hMainWnd, TEXT("SPLITTERPOSITION")) = getStoredValue(TEXT("splitter-position"), 200);
 	*(int*)GetProp(hMainWnd, TEXT("FONTSIZE")) = getStoredValue(TEXT("font-size"), 16);
+	*(int*)GetProp(hMainWnd, TEXT("MAXHIGHLIGHTLENGTH")) = getStoredValue(TEXT("max-highlight-length"), 64000);	
 
 	HWND hStatusWnd = CreateStatusWindow(WS_CHILD | WS_VISIBLE |  (isStandalone ? SBARS_SIZEGRIP : 0), NULL, hMainWnd, IDC_STATUSBAR);
 	int sizes[5] = {100, 200, 400, 500, -1};
@@ -175,9 +216,11 @@ HWND APIENTRY ListLoad (HWND hListerWnd, char* fileToLoad, int showFlags) {
 
 	HWND hTreeWnd = CreateWindow(WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | TVS_HASBUTTONS | TVS_HASLINES | TVS_SHOWSELALWAYS | WS_TABSTOP,
 		0, 0, 100, 100, hMainWnd, (HMENU)IDC_TREE, GetModuleHandle(0), NULL);
+	SetProp(hTreeWnd, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hTreeWnd, GWLP_WNDPROC, (LONG_PTR)cbHotKey));	
 
 	HWND hTabWnd = CreateWindow(WC_TABCONTROL, NULL, WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE | WS_TABSTOP, 100, 100, 100, 100,
 		hMainWnd, (HMENU)IDC_TAB, GetModuleHandle(0), NULL);
+	SetProp(hTabWnd, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hTabWnd, GWLP_WNDPROC, (LONG_PTR)cbHotKey));	
 
 	TCITEM tci;
 	tci.mask = TCIF_TEXT | TCIF_IMAGE;
@@ -194,6 +237,7 @@ HWND APIENTRY ListLoad (HWND hListerWnd, char* fileToLoad, int showFlags) {
 	HWND hGridWnd = CreateWindow(WC_LISTVIEW, NULL, (tabNo == 0 ? WS_VISIBLE : 0) | WS_CHILD  | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_OWNERDATA | WS_TABSTOP,
 		205, 0, 100, 100, hTabWnd, (HMENU)IDC_GRID, GetModuleHandle(0), NULL);
 	ListView_SetExtendedListViewStyle(hGridWnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+	SetProp(hGridWnd, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hGridWnd, GWLP_WNDPROC, (LONG_PTR)cbHotKey));
 
 	HWND hHeader = ListView_GetHeader(hGridWnd);
 	LONG_PTR styles = GetWindowLongPtr(hHeader, GWL_STYLE);
@@ -221,17 +265,13 @@ HWND APIENTRY ListLoad (HWND hListerWnd, char* fileToLoad, int showFlags) {
 	addNode(hTreeWnd, hRoot, json);
 	TreeView_Expand(hTreeWnd, hRoot, TVE_EXPAND);
 	TreeView_Select(hTreeWnd, hRoot, TVGN_CARET);
-
-	RegisterHotKey(hMainWnd, IDH_EXIT, 0, VK_ESCAPE);
-	RegisterHotKey(hMainWnd, IDH_NEXT, 0, VK_TAB);
-	RegisterHotKey(hMainWnd, IDH_PREV, MOD_CONTROL, VK_TAB);
 	SetFocus(hTreeWnd);
 
 	return hMainWnd;
 }
 
 void __stdcall ListCloseWindow(HWND hWnd) {
-	setStoredValue(TEXT("splitter-width"), *(int*)GetProp(hWnd, TEXT("SPLITTERWIDTH")));
+	setStoredValue(TEXT("splitter-position"), *(int*)GetProp(hWnd, TEXT("SPLITTERPOSITION")));
 	setStoredValue(TEXT("font-size"), *(int*)GetProp(hWnd, TEXT("FONTSIZE")));
 	setStoredValue(TEXT("tab-no"), TabCtrl_GetCurSel(GetDlgItem(hWnd, IDC_TAB)));
 
@@ -241,7 +281,8 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 	free((int*)GetProp(hWnd, TEXT("TOTALROWCOUNT")));
 	free((int*)GetProp(hWnd, TEXT("ORDERBY")));
 	free((int*)GetProp(hWnd, TEXT("COLNO")));
-	free((int*)GetProp(hWnd, TEXT("SPLITTERWIDTH")));
+	free((int*)GetProp(hWnd, TEXT("SPLITTERPOSITION")));
+	free((TCHAR*)GetProp(hWnd, TEXT("FONTFAMILY")));
 
 	DeleteFont(GetProp(hWnd, TEXT("FONT")));
 	DeleteObject(GetProp(hWnd, TEXT("GRAYBRUSH")));
@@ -256,9 +297,11 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 	RemoveProp(hWnd, TEXT("ORDERBY"));
 	RemoveProp(hWnd, TEXT("COLNO"));
 	RemoveProp(hWnd, TEXT("JSON"));
-	RemoveProp(hWnd, TEXT("SPLITTERWIDTH"));
+	RemoveProp(hWnd, TEXT("SPLITTERPOSITION"));
 
 	RemoveProp(hWnd, TEXT("FONT"));
+	RemoveProp(hWnd, TEXT("FONTFAMILY"));
+	RemoveProp(hWnd, TEXT("FONTSIZE"));
 	RemoveProp(hWnd, TEXT("GRAYBRUSH"));
 	RemoveProp(hWnd, TEXT("DATAMENU"));
 	RemoveProp(hWnd, TEXT("TEXTMENU"));
@@ -269,31 +312,6 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 
 LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	switch (msg) {
-		case WM_HOTKEY: {
-			WPARAM id = wParam;
-			if (id == IDH_EXIT)
-				SendMessage(GetParent(hWnd), WM_CLOSE, 0, 0);
-
-			if (id == IDH_NEXT || id == IDH_PREV) {
-				HWND hFocus = GetFocus();
-				HWND wnds[1000] = {0};
-				EnumChildWindows(hWnd, (WNDENUMPROC)cbEnumTabStopChildren, (LPARAM)wnds);
-
-				int no = 0;
-				while(wnds[no] && wnds[no] != hFocus)
-					no++;
-
-				int cnt = no;
-				while(wnds[cnt])
-					cnt++;
-
-				BOOL isBackward = id == IDH_PREV;
-				no += isBackward ? -1 : 1;
-				SetFocus(wnds[no] ? wnds[no] : (isBackward ? wnds[cnt - 1] : wnds[0]));
-			}
-		}
-		break;
-
 		case WM_SIZE: {
 			HWND hStatusWnd = GetDlgItem(hWnd, IDC_STATUSBAR);
 			SendMessage(hStatusWnd, WM_SIZE, 0, 0);
@@ -301,20 +319,20 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			GetClientRect(hStatusWnd, &rc);
 			int statusH = rc.bottom;
 
-			int splitterW = *(int*)GetProp(hWnd, TEXT("SPLITTERWIDTH"));
+			int splitterW = *(int*)GetProp(hWnd, TEXT("SPLITTERPOSITION"));
 			GetClientRect(hWnd, &rc);
 			HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
 			HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
 			SetWindowPos(hTreeWnd, 0, 0, 0, splitterW, rc.bottom - statusH, SWP_NOMOVE | SWP_NOZORDER);
-			SetWindowPos(hTabWnd, 0, splitterW + 5, 0, rc.right - splitterW - 5, rc.bottom - statusH, SWP_NOZORDER);
+			SetWindowPos(hTabWnd, 0, splitterW + SPLITTER_WIDTH, 0, rc.right - splitterW - SPLITTER_WIDTH, rc.bottom - statusH, SWP_NOZORDER);
 
 			RECT rc2;
 			GetClientRect(hTabWnd, &rc);
 			TabCtrl_GetItemRect(hTabWnd, 0, &rc2);
-			SetWindowPos(hTextWnd, 0, 2, rc2.bottom + 3, rc.right - rc.left - 5, rc.bottom - rc2.bottom - 7, SWP_NOZORDER);
-			SetWindowPos(hGridWnd, 0, 2, rc2.bottom + 3, rc.right - rc.left - 5, rc.bottom - rc2.bottom - 7, SWP_NOZORDER);
+			SetWindowPos(hTextWnd, 0, 2, rc2.bottom + 3, rc.right - rc.left - SPLITTER_WIDTH, rc.bottom - rc2.bottom - 7, SWP_NOZORDER);
+			SetWindowPos(hGridWnd, 0, 2, rc2.bottom + 3, rc.right - rc.left - SPLITTER_WIDTH, rc.bottom - rc2.bottom - 7, SWP_NOZORDER);
 		}
 		break;
 
@@ -324,8 +342,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 			RECT rc;
 			GetClientRect(hWnd, &rc);
-			rc.left = *(int*)GetProp(hWnd, TEXT("SPLITTERWIDTH"));
-			rc.right = rc.left + 5;
+			rc.left = *(int*)GetProp(hWnd, TEXT("SPLITTERPOSITION"));
+			rc.right = rc.left + SPLITTER_WIDTH;
 			FillRect(hDC, &rc, (HBRUSH)GetProp(hWnd, TEXT("GRAYBRUSH")));
 			EndPaint(hWnd, &ps);
 
@@ -340,8 +358,12 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		break;
 
 		case WM_LBUTTONDOWN: {
-			SetProp(hWnd, TEXT("ISMOUSEDOWN"), (HANDLE)1);
-			SetCapture(hWnd);
+			int x = GET_X_LPARAM(lParam);
+			int pos = *(int*)GetProp(hWnd, TEXT("SPLITTERPOSITION"));
+			if (x >= pos || x <= pos + SPLITTER_WIDTH) {
+				SetProp(hWnd, TEXT("ISMOUSEDOWN"), (HANDLE)1);
+				SetCapture(hWnd);
+			}
 			return 0;
 		}
 		break;
@@ -358,7 +380,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 			DWORD x = GET_X_LPARAM(lParam);
 			if (x > 0 && x < 32000)
-				*(int*)GetProp(hWnd, TEXT("SPLITTERWIDTH")) = x;
+				*(int*)GetProp(hWnd, TEXT("SPLITTERPOSITION")) = x;
 			SendMessage(hWnd, WM_SIZE, 0, 0);
 		}
 		break;
@@ -367,6 +389,30 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			if (LOWORD(wParam) == MK_CONTROL) {
 				SendMessage(hWnd, WMU_SET_FONT, GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1: -1, 0);
 				return 1;
+			}
+		}
+		break;
+		
+		case WM_KEYDOWN: {
+			if (wParam == VK_ESCAPE)
+				SendMessage(GetParent(hWnd), WM_CLOSE, 0, 0);
+
+			if (wParam == VK_TAB) {
+				HWND hFocus = GetFocus();
+				HWND wnds[1000] = {0};
+				EnumChildWindows(hWnd, (WNDENUMPROC)cbEnumTabStopChildren, (LPARAM)wnds);
+
+				int no = 0;
+				while(wnds[no] && wnds[no] != hFocus)
+					no++;
+
+				int cnt = no;
+				while(wnds[cnt])
+					cnt++;
+
+				BOOL isBackward = HIWORD(GetKeyState(VK_CONTROL));
+				no += isBackward ? -1 : 1;
+				SetFocus(wnds[no] && no >= 0 ? wnds[no] : (isBackward ? wnds[cnt - 1] : wnds[0]));
 			}
 		}
 		break;
@@ -435,8 +481,10 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				ShowWindow(GetDlgItem(hTabWnd, IDC_TEXT), isText ? SW_SHOW : SW_HIDE);
 			}
 
-			if (pHdr->idFrom == IDC_TREE && pHdr->code == TVN_SELCHANGED)
+			if (pHdr->idFrom == IDC_TREE && pHdr->code == TVN_SELCHANGED) {
 				SendMessage(hWnd, WMU_UPDATE_GRID, 0, 0);
+				SendMessage(hWnd, WMU_UPDATE_TEXT, 0, 0);
+			}
 
 			if (pHdr->idFrom == IDC_GRID && pHdr->code == LVN_GETDISPINFO) {
 				LV_DISPINFO* pDispInfo = (LV_DISPINFO*)lParam;
@@ -479,7 +527,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 			if (pHdr->idFrom == IDC_GRID && pHdr->code == (DWORD)LVN_KEYDOWN) {
 				NMLVKEYDOWN* kd = (LPNMLVKEYDOWN) lParam;
-				if (kd->wVKey == 0x43 && GetKeyState(VK_CONTROL)) // Ctrl + C
+				if (kd->wVKey == 0x43 && HIWORD(GetKeyState(VK_CONTROL))) // Ctrl + C
 					SendMessage(hWnd, WM_COMMAND, IDM_COPY_ROW, 0);
 			}
 
@@ -496,33 +544,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			HWND hStatusWnd = GetDlgItem(hWnd, IDC_STATUSBAR);
 
 			HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);
-			TV_ITEM tv = {0};
-			tv.mask = TVIF_PARAM;
-			tv.hItem = hItem;
-			TreeView_GetItem(hTreeWnd, &tv);
-			JSON_Value* val = (JSON_Value*)tv.lParam;
+			JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
 			JSON_Value_Type type = json_value_get_type(val);
-
-			TCHAR* text16;
-			if (type == JSONArray || type == JSONObject) {
-				char* text8 = json_serialize_to_string_pretty(val);
-				text16 = utf8to16(text8);
-				json_free_serialized_string(text8);
-			} else {
-				char* text8 = json_value_get_as_string(val);
-				text16 = utf8to16(text8);
-				free(text8);
-			}
-
-			LockWindowUpdate(hTextWnd);
-			SendMessage(hTextWnd, EM_EXLIMITTEXT, 0, _tcslen(text16) + 1);
-			SetWindowText(hTextWnd, text16);
-			if (_tcslen(text16) < MAX_HIGHLIGHT_LENGTH)
-				highlightBlock(hTextWnd, text16, 0);
-			SendMessage(hTextWnd, EM_SETSEL, 0, 0);
-			LockWindowUpdate(0);
-			InvalidateRect(hTextWnd, NULL, TRUE);
-			free(text16);
 
 			HWND hHeader = ListView_GetHeader(hGridWnd);
 			SendMessage(hWnd, WMU_RESET_CACHE, 0, 0);
@@ -665,7 +688,10 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 			if (!cache)
 				return 1;
-
+				
+			if (*pTotalRowCount == 0)	
+				return 1;
+				
 			int colCount = Header_GetItemCount(hHeader);
 			BOOL* bResultset = (BOOL*)calloc(*pTotalRowCount, sizeof(BOOL));
 			for (int rowNo = 0; rowNo < *pTotalRowCount; rowNo++)
@@ -709,6 +735,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				resultset[rowCount] = rowNo;
 				rowCount++;
 			}
+			free(bResultset);
 
 			if (rowCount > 0) {
 				resultset = realloc(resultset, rowCount * sizeof(int));
@@ -734,6 +761,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 					}
 				}
 			} else {
+				SetProp(hWnd, TEXT("RESULTSET"), (HANDLE)0);			
 				free(resultset);
 			}
 
@@ -748,7 +776,60 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			PostMessage(hWnd, WMU_UPDATE_FILTER_SIZE, 0, 0);
 		}
 		break;
+		
+		case WMU_UPDATE_TEXT: {
+			HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);
+			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
+			HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
 
+			HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);			
+			JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
+			JSON_Value_Type type = json_value_get_type(val);
+
+			TCHAR* text16;
+			if (type == JSONArray || type == JSONObject) {
+				char* text8 = json_serialize_to_string_pretty(val);
+				text16 = utf8to16(text8);
+				json_free_serialized_string(text8);
+			} else {
+				char* text8 = json_value_get_as_string(val);
+				text16 = utf8to16(text8);
+				free(text8);
+			}
+			
+			LockWindowUpdate(hTextWnd);
+			SendMessage(hTextWnd, EM_EXLIMITTEXT, 0, _tcslen(text16) + 1);
+			SetWindowText(hTextWnd, text16);
+			LockWindowUpdate(0);
+			free(text16);		
+			
+			SendMessage(hWnd, WMU_UPDATE_HIGHLIGHT, 0, 0);	
+		}
+		break;
+		
+		case WMU_UPDATE_HIGHLIGHT: {
+			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
+			HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
+
+			GETTEXTLENGTHEX gtl = {GTL_NUMBYTES, 0};
+			int len = SendMessage(hTextWnd, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 1200);
+			if (len < *(int*)GetProp(hWnd, TEXT("MAXHIGHLIGHTLENGTH"))) {
+				TCHAR* text = calloc(len + sizeof(TCHAR), sizeof(char));
+				GETTEXTEX gt = {0};
+				gt.cb = len + sizeof(TCHAR);
+				gt.flags = 0;
+				gt.codepage = 1200;
+				SendMessage(hTextWnd, EM_GETTEXTEX, (WPARAM)&gt, (LPARAM)text);
+				LockWindowUpdate(hTextWnd);
+				highlightBlock(hTextWnd, text, 0);
+				free(text);
+				SendMessage(hTextWnd, EM_SETSEL, 0, 0);
+				LockWindowUpdate(0);
+				InvalidateRect(hTextWnd, NULL, TRUE);
+			}
+		}
+		break;
+		
 		case WMU_UPDATE_FILTER_SIZE: {
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
@@ -791,12 +872,15 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				ListView_SetColumnWidth(hGridWnd, colNo, LVSCW_AUTOSIZE);
 				TCHAR name16[MAX_LENGTH + 1];
 				Header_GetItemText(hHeader, colNo, name16, MAX_LENGTH);
-				RECT rc;
+				
+				SIZE s = {0};
 				HDC hDC = GetDC(hHeader);
-				DrawText(hDC, name16, _tcslen(name16), &rc, DT_NOCLIP | DT_CALCRECT);
+				HFONT hOldFont = (HFONT)SelectObject(hDC, (HFONT)GetProp(hWnd, TEXT("FONT")));
+				GetTextExtentPoint32(hDC, name16, _tcslen(name16), &s);
+				SelectObject(hDC, hOldFont);
 				ReleaseDC(hHeader, hDC);
 
-				int w = rc.right - rc.left + 10;
+				int w = s.cx + 12;
 				if (ListView_GetColumnWidth(hGridWnd, colNo) < w)
 					ListView_SetColumnWidth(hGridWnd, colNo, w);
 
@@ -851,7 +935,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			*pFontSize += wParam;
 			DeleteFont(GetProp(hWnd, TEXT("FONT")));
 
-			HFONT hFont = CreateFont (*pFontSize, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, TEXT("Arial"));
+			HFONT hFont = CreateFont (*pFontSize, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, (TCHAR*)GetProp(hWnd, TEXT("FONTFAMILY")));
 			HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
@@ -915,25 +999,23 @@ LRESULT CALLBACK cbNewFilterEdit(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 		}
 		break;
 
-		// Prevent beep
 		case WM_CHAR: {
-			if (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB)
-				return 0;
+			return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);
 		}
 		break;
 
 		case WM_KEYDOWN: {
-			if (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB) {
-				if (wParam == VK_RETURN) {
-					HWND hHeader = GetParent(hWnd);
-					HWND hGridWnd = GetParent(hHeader);
-					HWND hTabWnd = GetParent(hGridWnd);
-					HWND hMainWnd = GetParent(hTabWnd);
-					SendMessage(hMainWnd, WMU_UPDATE_RESULTSET, 0, 0);
-				}
-
+			if (wParam == VK_RETURN) {
+				HWND hHeader = GetParent(hWnd);
+				HWND hGridWnd = GetParent(hHeader);
+				HWND hTabWnd = GetParent(hGridWnd);
+				HWND hMainWnd = GetParent(hTabWnd);
+				SendMessage(hMainWnd, WMU_UPDATE_RESULTSET, 0, 0);
 				return 0;
 			}
+			
+			if (wParam == VK_TAB || wParam == VK_ESCAPE)
+				return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);		
 		}
 		break;
 
@@ -955,7 +1037,32 @@ LRESULT CALLBACK cbNewText(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		SendMessage(GetParent(hTabWnd), msg, wParam, lParam);
 		return 0;
 	}
+	
+	if (msg == WM_KEYDOWN && (wParam == VK_F3 || wParam == VK_F5 || wParam == VK_F7 || HIWORD(GetKeyState(VK_CONTROL)) && wParam == 0x46)) { // Ctrl + F
+		SendMessage(GetAncestor(hWnd, GA_ROOT), WM_KEYDOWN, wParam, lParam);
+		return 0;
+	}
+	
+	if (msg == WM_KEYDOWN && (wParam == VK_TAB || wParam == VK_ESCAPE)) { 
+		return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);
+	}
 
+	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	if (msg == WM_KEYDOWN && (wParam == VK_TAB || wParam == VK_ESCAPE)) {
+		HWND hMainWnd = hWnd;
+		while (hMainWnd && GetDlgCtrlID(hMainWnd) != IDC_MAIN)
+			hMainWnd = GetParent(hMainWnd);
+		SendMessage(hMainWnd, WM_KEYDOWN, wParam, lParam);
+		return 0;
+	}
+	
+	// Prevent beep
+	if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB))
+		return 0;
+	
 	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
 }
 
@@ -987,10 +1094,11 @@ BOOL addNode(HWND hTreeWnd, HTREEITEM hParentItem, JSON_Value* val) {
 	JSON_Value_Type type = json_value_get_type(val);
 	if (type == JSONArray) {
 		JSON_Array* arr = json_value_get_array(val);
-		for (int itemNo = 0; itemNo < json_array_get_count(arr); itemNo++) {
-			JSON_Value* val2 = json_array_get_value(arr, itemNo);
+		int cnt = json_array_get_count(arr);
+		for (int itemNo = 0; itemNo < cnt; itemNo++) {
+			JSON_Value* val2 = json_array_get_value(arr, cnt - itemNo - 1);
 			TCHAR itemName[64];
-			_sntprintf(itemName, 64, TEXT("[%i]"), itemNo);
+			_sntprintf(itemName, 64, TEXT("[%i]"), cnt - itemNo - 1);
 			HTREEITEM hItem = TreeView_AddItem(hTreeWnd, itemName, hParentItem, (LPARAM)val2);
 			addNode(hTreeWnd, hItem, val2);
 		}
@@ -1000,9 +1108,10 @@ BOOL addNode(HWND hTreeWnd, HTREEITEM hParentItem, JSON_Value* val) {
 
 	if (type == JSONObject) {
 		JSON_Object* obj = json_value_get_object(val);
-		for (int itemNo = 0; itemNo < json_object_get_count(obj); itemNo++) {
-			JSON_Value* val2 = json_object_get_value_at(obj, itemNo);
-			TCHAR* itemName = utf8to16(json_object_get_name(obj, itemNo));
+		int cnt = json_object_get_count(obj);
+		for (int itemNo = 0; itemNo < cnt; itemNo++) {
+			JSON_Value* val2 = json_object_get_value_at(obj, cnt - itemNo - 1);
+			TCHAR* itemName = utf8to16(json_object_get_name(obj, cnt - itemNo - 1));
 			HTREEITEM hItem = TreeView_AddItem(hTreeWnd, itemName, hParentItem, (LPARAM)val2);
 			addNode(hTreeWnd, hItem, val2);
 			free(itemName);
@@ -1103,6 +1212,13 @@ void setStoredValue(TCHAR* name, int value) {
 int getStoredValue(TCHAR* name, int defValue) {
 	TCHAR buf[128];
 	return GetPrivateProfileString(APP_NAME, name, NULL, buf, 128, iniPath) ? _ttoi(buf) : defValue;
+}
+
+TCHAR* getStoredString(TCHAR* name, TCHAR* defValue) { 
+	TCHAR* buf = calloc(256, sizeof(TCHAR));
+	if (0 == GetPrivateProfileString(APP_NAME, name, NULL, buf, 128, iniPath) && defValue)
+		_tcsncpy(buf, defValue, 255);
+	return buf;	
 }
 
 int CALLBACK cbEnumTabStopChildren (HWND hWnd, LPARAM lParam) {
@@ -1211,7 +1327,7 @@ HTREEITEM TreeView_AddItem (HWND hTreeWnd, TCHAR* caption, HTREEITEM parent, LPA
 	tvi.lParam = lParam;
 
 	tvins.item = tvi;
-	tvins.hInsertAfter = TVI_LAST;
+	tvins.hInsertAfter = TVI_FIRST;
 	tvins.hParent = parent;
 	return (HTREEITEM)SendMessage(hTreeWnd, TVM_INSERTITEM, 0, (LPARAM)(LPTVINSERTSTRUCT)&tvins);
 };
@@ -1223,6 +1339,14 @@ int TreeView_GetItemText(HWND hTreeWnd, HTREEITEM hItem, TCHAR* buf, int maxLen)
 	tv.cchTextMax = maxLen;
 	tv.pszText = buf;
 	return TreeView_GetItem(hTreeWnd, &tv);
+}
+
+LPARAM TreeView_GetItemParam(HWND hTreeWnd, HTREEITEM hItem) {
+	TV_ITEM tv = {0};
+	tv.mask = TVIF_PARAM;
+	tv.hItem = hItem;
+
+	return TreeView_GetItem(hTreeWnd, &tv) ? tv.lParam : 0;
 }
 
 int TreeView_SetItemText(HWND hTreeWnd, HTREEITEM hItem, TCHAR* text) {
