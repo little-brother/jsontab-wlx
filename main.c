@@ -84,6 +84,8 @@ int TreeView_SetItemText(HWND hTreeWnd, HTREEITEM hItem, TCHAR* text);
 int ListView_AddColumn(HWND hListWnd, TCHAR* colName);
 int Header_GetItemText(HWND hWnd, int i, TCHAR* pszText, int cchTextMax);
 
+json_set_escape_slashes(0);
+
 BOOL APIENTRY DllMain (HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
 	return TRUE;
 }
