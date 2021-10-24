@@ -144,6 +144,7 @@ HWND APIENTRY ListLoad (HWND hListerWnd, char* fileToLoad, int showFlags) {
 	fread(data, sizeof(char), st.st_size, f);
 	fclose(f);
 
+	json_set_escape_slashes(0);
 	JSON_Value* json = isUtf8(data) ? json_parse_string(data) : 0;
 	// ANSI
 	if (!json) {
