@@ -44,17 +44,21 @@
 #define IDM_SELECTALL          5011
 
 #define SB_VERSION             0
-#define SB_CHILD_NO            1
-#define SB_TYPE                2
-#define SB_ROW_COUNT           3
-#define SB_CURRENT_ROW         4
-#define SB_AUXILIARY           5
+#define SB_CODEPAGE            1
+#define SB_CHILD_NO            2
+#define SB_TYPE                3
+#define SB_ROW_COUNT           4
+#define SB_CURRENT_ROW         5
+#define SB_AUXILIARY           6
 
 #define SPLITTER_WIDTH         5
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("0.9.3")
+#define APP_VERSION            TEXT("0.9.4")
+
+#define CP_UTF16LE             1200
+#define CP_UTF16BE             1201
 
 #define LCS_FINDFIRST          1
 #define LCS_MATCHCASE          2
@@ -86,6 +90,7 @@ int CALLBACK cbEnumTabStopChildren (HWND hWnd, LPARAM lParam);
 TCHAR* utf8to16(const char* in);
 char* utf16to8(const TCHAR* in);
 int findString(TCHAR* text, TCHAR* word, BOOL isMatchCase, BOOL isWholeWords);
+int detectCodePage(const unsigned char *data);
 void setClipboardText(const TCHAR* text);
 BOOL isNumber(TCHAR* val);
 BOOL isUtf8(const char * string);
@@ -215,41 +220,40 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	FILE *f = _tfopen(fileToLoad, TEXT("rb"));
 	fread(data, sizeof(char), st.st_size, f);
 	fclose(f);
-
-	json_set_escape_slashes(0);
-	JSON_Value* json = isUtf8(data) ? json_parse_string(data) : 0;
-	// ANSI
-	if (!json) {
+	
+	int cp = detectCodePage(data);		 	
+	if (cp == CP_ACP) {
 		DWORD len = MultiByteToWideChar(CP_ACP, 0, data, -1, NULL, 0);
 		TCHAR* data16 = (TCHAR*)calloc (len, sizeof (TCHAR));
 		MultiByteToWideChar(CP_ACP, 0, data, -1, data16, len);
 
 		char* data8 = utf16to8(data16);
-		json = json_parse_string(data8);
-		free(data8);
+		free(data);
 		free(data16);
+		data = data8;
 	}
 
-	// UTF16LE
-	if (!json) {
-		char* data8 = utf16to8((TCHAR*)data);
-		json = json_parse_string(data8);
-		free(data8);
-	}
-
-	// UTF16BE
-	if (!json) {
-		for (int i = 0; i < st.st_size/2; i++) {
+	if (cp == CP_UTF16BE || cp == CP_UTF16LE) {
+		for (int i = 0; cp == CP_UTF16BE && i < st.st_size/2; i++) {
 			int c = data[2 * i];
 			data[2 * i] = data[2 * i + 1];
 			data[2 * i + 1] = c;
 		}
 
 		char* data8 = utf16to8((TCHAR*)data);
-		json = json_parse_string(data8);
-		free(data8);
+		free(data);		
+		data = data8;
 	}
-
+	
+	int offset = strncmp(data, "\xEF\xBB\xBF", 3) == 0 ? 3 : 0;
+	
+	while(data[offset] == '/' && data[offset + 1] == '/') {
+		offset += strcspn(data + offset, "\r\n");
+		offset += strchr("\r\n", data[offset]) != 0;
+	}
+	
+	json_set_escape_slashes(0);
+	JSON_Value* json = json_parse_string(data + offset);
 	free(data);
 	if (!json)
 		return 0;
@@ -306,8 +310,8 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	HDC hDC = GetDC(hMainWnd);
 	float z = GetDeviceCaps(hDC, LOGPIXELSX) / 96.0; // 96 = 100%, 120 = 125%, 144 = 150%
 	ReleaseDC(hMainWnd, hDC);	
-	int sizes[6] = {35 * z, 140 * z, 200 * z, 400 * z, 500 * z, -1};
-	SendMessage(hStatusWnd, SB_SETPARTS, 6, (LPARAM)&sizes);
+	int sizes[7] = {35 * z, 95*z, 140 * z, 200 * z, 400 * z, 500 * z, -1};
+	SendMessage(hStatusWnd, SB_SETPARTS, 7, (LPARAM)&sizes);
 
 	HWND hTreeWnd = CreateWindow(WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | TVS_HASBUTTONS | TVS_HASLINES | TVS_SHOWSELALWAYS | WS_TABSTOP,
 		0, 0, 100, 100, hMainWnd, (HMENU)IDC_TREE, GetModuleHandle(0), NULL);
@@ -363,7 +367,9 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	TCHAR buf[255];
 	_sntprintf(buf, 32, TEXT(" %ls"), APP_VERSION);	
 	SendMessage(hStatusWnd, SB_SETTEXT, SB_VERSION, (LPARAM)buf);	
-
+	SendMessage(hStatusWnd, SB_SETTEXT, SB_CODEPAGE, 
+		(LPARAM)(cp == CP_UTF8 ? TEXT("    UTF-8") : cp == CP_UTF16LE ? TEXT(" UTF-16LE") : cp == CP_UTF16BE ? TEXT(" UTF-16BE") : TEXT("     ANSI")));	
+		
 	SendMessage(hMainWnd, WMU_SET_FONT, 0, 0);
 	SendMessage(hMainWnd, WMU_SET_THEME, 0, 0);
 	HTREEITEM hRoot = TreeView_AddItem(hTreeWnd, TEXT("<<root>>"), TVI_ROOT, (LPARAM)json);
@@ -735,7 +741,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
 			JSON_Value_Type type = json_value_get_type(val);
 
-			HWND hHeader = ListView_GetHeader(hGridWnd);
+			HWND hHeader = ListView_GetHeader(hGridWnd);			
 			SendMessage(hWnd, WMU_RESET_CACHE, 0, 0);
 			*(int*)GetProp(hWnd, TEXT("ORDERBY")) = 0;
 
@@ -818,7 +824,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							cache[rowNo][0] = utf8to16(value8);
 							free(value8);
 						}
-					}
+					} 
 				}
 			} else if (type == JSONObject) {
 				JSON_Object* obj = json_value_get_object(val);
@@ -834,8 +840,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 						char* value8 = json_value_get_as_string(valValue);
 						cache[rowNo][1] = utf8to16(value8);
 						free(value8);
-					}
-				}
+					} 
+				}				
 			} else {
 				rowCount = 1;
 				SetProp(hWnd, TEXT("CACHE"), calloc(rowCount, sizeof(TCHAR*)));
@@ -845,7 +851,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				cache[0][0] = utf8to16(value8);
 				free(value8);
 			}
-
+			
 			TCHAR buf[255];
 			TCHAR *TYPES[10] = {TEXT(""), TEXT("NULL"), TEXT("STRING"), TEXT("NUMBER"), TEXT("OBJECT"), TEXT("ARRAY"), TEXT("BOOLEAN")};
 			_sntprintf(buf, 255, TEXT(" %ls"), TYPES[type]);
@@ -876,11 +882,13 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			int* pRowCount = (int*)GetProp(hWnd, TEXT("ROWCOUNT"));
 			int* pOrderBy = (int*)GetProp(hWnd, TEXT("ORDERBY"));
 
-			if (!cache)
+			if (!cache || *pTotalRowCount == 0)	{ 
+				*pRowCount = 0;
+				ListView_SetItemCount(hGridWnd, 0);
+				InvalidateRect(hGridWnd, NULL, TRUE);
+				SendMessage(hStatusWnd, SB_SETTEXT, SB_ROW_COUNT, (LPARAM)TEXT("Rows: 0/0"));			
 				return 1;
-				
-			if (*pTotalRowCount == 0)	
-				return 1;
+			}
 				
 			int colCount = Header_GetItemCount(hHeader);
 			BOOL* bResultset = (BOOL*)calloc(*pTotalRowCount, sizeof(BOOL));
@@ -1151,7 +1159,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				free(resultset);
 			int* pRowCount = (int*)GetProp(hWnd, TEXT("ROWCOUNT"));
 			*pRowCount = 0;
-
+			
+			SetProp(hWnd, TEXT("RESULTSET"), 0);
 			SetProp(hWnd, TEXT("CACHE"), 0);
 			*pTotalRowCount = 0;
 		}
@@ -1584,6 +1593,18 @@ int findString(TCHAR* text, TCHAR* word, BOOL isMatchCase, BOOL isWholeWords) {
 
 	return res; 
 }	
+
+int detectCodePage(const unsigned char *data) {
+	return strncmp(data, "\xEF\xBB\xBF", 3) == 0 ? CP_UTF8 : // BOM
+		strncmp(data, "\xFE\xFF", 2) == 0 ? CP_UTF16BE : // BOM
+		strncmp(data, "\xFF\xFE", 2) == 0 ? CP_UTF16LE : // BOM
+		strncmp(data, "\x00\x5B", 2) == 0 || strncmp(data, "\x00\x7B", 2) == 0 ? CP_UTF16BE : // [ {		
+		strncmp(data, "\x5B\x00", 2) == 0 || strncmp(data, "\x7B\x00", 2) == 0 ? CP_UTF16LE : // [ {
+		strncmp(data, "\x2F\x00\x2F\x00", 4) == 0 ? CP_UTF16BE : // //
+		strncmp(data, "\x00\x2F\x00\x2F", 4) == 0 ? CP_UTF16LE : // //
+		isUtf8(data) ? CP_UTF8 :		
+		CP_ACP;	
+}
 
 void setClipboardText(const TCHAR* text) {
 	int len = (_tcslen(text) + 1) * sizeof(TCHAR);
