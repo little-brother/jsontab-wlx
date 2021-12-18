@@ -57,7 +57,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("0.9.5")
+#define APP_VERSION            TEXT("0.9.6")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -135,9 +135,10 @@ int __stdcall ListSearchTextW(HWND hWnd, TCHAR* searchString, int searchParamete
 	if (TabCtrl_GetCurSel(hTabWnd) == 1) { 
 		HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
 		DWORD len = _tcslen(searchString);
-		int spos = SendMessage(hTextWnd, EM_GETSEL, 0, 0);
+		DWORD spos = 0;
+		SendMessage(hTextWnd, EM_GETSEL, 0, (LPARAM)&spos);
 		int mode = 0;	
-		FINDTEXTEXW ft = {{HIWORD(spos), -1}, searchString, {0, 0}};
+		FINDTEXTEXW ft = {{spos, -1}, searchString, {0, 0}};
 		if (searchParameter & LCS_MATCHCASE)
 			mode |= FR_MATCHCASE;
 		if (searchParameter & LCS_WHOLEWORDS)
@@ -797,10 +798,11 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				if (kd->wVKey == 0x43) { // C
 					BOOL isCtrl = HIWORD(GetKeyState(VK_CONTROL));
 					BOOL isShift = HIWORD(GetKeyState(VK_SHIFT)); 
+					BOOL isCopyColumn = getStoredValue(TEXT("copy-column"), 0) && ListView_GetSelectedCount(pHdr->hwndFrom) > 1;
 					if (!isCtrl && !isShift)
 						return FALSE;
 						
-					int action = !isShift ? IDM_COPY_CELL : isCtrl ? IDM_COPY_COLUMN : IDM_COPY_ROWS;
+					int action = !isShift && !isCopyColumn ? IDM_COPY_CELL : isCtrl || isCopyColumn ? IDM_COPY_COLUMN : IDM_COPY_ROWS;
 					SendMessage(hWnd, WM_COMMAND, action, 0);
 					return TRUE;
 				}
@@ -1533,17 +1535,7 @@ LRESULT CALLBACK cbNewText(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		return 0;
 	}
 	
-	if (msg == WM_KEYDOWN && (wParam == VK_F3 || wParam == VK_F5 || wParam == VK_F7 || HIWORD(GetKeyState(VK_CONTROL)) && wParam == 0x46)) { // Ctrl + F
-		SendMessage(GetAncestor(hWnd, GA_ROOT), WM_KEYDOWN, wParam, lParam);
-		return 0;
-	}
-	
-	if (msg == WM_KEYDOWN && wParam == VK_F1) {
-		SendMessage(getMainWindow(hWnd), WM_KEYDOWN, wParam, lParam);
-		return TRUE;
-	}
-		
-	if (msg == WM_KEYDOWN && (wParam == VK_TAB || wParam == VK_ESCAPE)) { 
+	if (msg == WM_KEYDOWN) { 
 		return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);
 	}
 
@@ -1558,7 +1550,12 @@ LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		(wParam >= 0x31 && wParam <= 0x38) && !getStoredValue(TEXT("disable-num-keys"), 0) || // 1 - 8
 		(wParam == 0x4E || wParam == 0x50) && !getStoredValue(TEXT("disable-np-keys"), 0))) { // N, P
 		HWND hMainWnd = getMainWindow(hWnd);
-		SendMessage(wParam == VK_TAB || wParam == VK_ESCAPE || wParam == VK_F1 ? hMainWnd : GetParent(hMainWnd), WM_KEYDOWN, wParam, lParam);
+		if (wParam == VK_TAB || wParam == VK_F1) { 
+			SendMessage(hMainWnd, WM_KEYDOWN, wParam, lParam);
+		} else {
+			SetFocus(GetParent(hMainWnd));		
+			keybd_event(wParam, wParam, KEYEVENTF_EXTENDEDKEY, 0);
+		}
 		return 0;
 	}
 	
@@ -1885,52 +1882,56 @@ BOOL isUtf8(const char * string) {
 }
 
 void mergeSortJoiner(int indexes[], void* data, int l, int m, int r, BOOL isBackward, BOOL isNums) {
-    int n1 = m - l + 1;
-    int n2 = r - m;
-
-    int L[n1], R[n2];
-
-    for (int i = 0; i < n1; i++)
-        L[i] = indexes[l + i];
-    for (int j = 0; j < n2; j++)
-        R[j] = indexes[m + 1 + j];
-
-    int i = 0, j = 0, k = l;
-    while (i < n1 && j < n2) {
-    	int cmp = isNums ? ((double*)data)[L[i]] <= ((double*)data)[R[j]] : _tcscmp(((TCHAR**)data)[L[i]], ((TCHAR**)data)[R[j]]) <= 0;
-    	if (isBackward)
-    		cmp = !cmp;
-    		
-        if (cmp) {
-            indexes[k] = L[i];
-            i++;
-        } else {
-            indexes[k] = R[j];
-            j++;
-        }
-        k++;
-    }
-
-    while (i < n1) {
-        indexes[k] = L[i];
-        i++;
-        k++;
-    }
-
-    while (j < n2) {
-        indexes[k] = R[j];
-        j++;
-        k++;
-    }
+	int n1 = m - l + 1;
+	int n2 = r - m;
+	
+	int* L = calloc(n1, sizeof(int));
+	int* R = calloc(n2, sizeof(int)); 
+	
+	for (int i = 0; i < n1; i++)
+		L[i] = indexes[l + i];
+	for (int j = 0; j < n2; j++)
+		R[j] = indexes[m + 1 + j];
+	
+	int i = 0, j = 0, k = l;
+	while (i < n1 && j < n2) {
+		int cmp = isNums ? ((double*)data)[L[i]] <= ((double*)data)[R[j]] : _tcscmp(((TCHAR**)data)[L[i]], ((TCHAR**)data)[R[j]]) <= 0;
+		if (isBackward)
+			cmp = !cmp;
+		
+		if (cmp) {
+			indexes[k] = L[i];
+			i++;
+		} else {
+			indexes[k] = R[j];
+			j++;
+		}
+		k++;
+	}
+	
+	while (i < n1) {
+		indexes[k] = L[i];
+		i++;
+		k++;
+	}
+	
+	while (j < n2) {
+		indexes[k] = R[j];
+		j++;
+		k++;
+	}
+	
+	free(L);
+	free(R);
 }
 
 void mergeSort(int indexes[], void* data, int l, int r, BOOL isBackward, BOOL isNums) {
-    if (l < r) {
-        int m = l + (r - l) / 2;
-        mergeSort(indexes, data, l, m, isBackward, isNums);
-        mergeSort(indexes, data, m + 1, r, isBackward, isNums);
-        mergeSortJoiner(indexes, data, l, m, r, isBackward, isNums);
-    }
+	if (l < r) {
+		int m = l + (r - l) / 2;
+		mergeSort(indexes, data, l, m, isBackward, isNums);
+		mergeSort(indexes, data, m + 1, r, isBackward, isNums);
+		mergeSortJoiner(indexes, data, l, m, r, isBackward, isNums);
+	}
 }
 
 HTREEITEM TreeView_AddItem (HWND hTreeWnd, TCHAR* caption, HTREEITEM parent, LPARAM lParam) {
