@@ -40,8 +40,9 @@
 #define IDM_COPY_CELL          5000
 #define IDM_COPY_ROWS          5001
 #define IDM_COPY_COLUMN        5002
-#define IDM_FILTER_ROW         5003
-#define IDM_DARK_THEME         5004
+#define IDM_COPY_AS_JSON       5003
+#define IDM_FILTER_ROW         5004
+#define IDM_DARK_THEME         5005
 #define IDM_COPY_TEXT          5010
 #define IDM_SELECTALL          5011
 
@@ -57,7 +58,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("0.9.6")
+#define APP_VERSION            TEXT("0.9.7")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -270,6 +271,8 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	
 	json_set_escape_slashes(0);
 	JSON_Value* json = json_parse_string(data + offset);
+	if (!json)
+		json = json_parse_string_with_comments(data + offset);
 	free(data);
 	if (!json)
 		return 0;
@@ -372,6 +375,7 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_CELL, TEXT("Copy cell"));
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_ROWS, TEXT("Copy row(s)"));
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_COLUMN, TEXT("Copy column"));	
+	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_AS_JSON, TEXT("Copy as json"));	
 	AppendMenu(hGridMenu, MF_STRING, 0, NULL);	
 	AppendMenu(hGridMenu, (*(int*)GetProp(hMainWnd, TEXT("FILTERROW")) != 0 ? MF_CHECKED : 0) | MF_STRING, IDM_FILTER_ROW, TEXT("Filters"));		
 	AppendMenu(hGridMenu, (*(int*)GetProp(hMainWnd, TEXT("DARKTHEME")) != 0 ? MF_CHECKED : 0) | MF_STRING, IDM_DARK_THEME, TEXT("Dark theme"));					
@@ -633,7 +637,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 		case WM_COMMAND: {
 			WORD cmd = LOWORD(wParam);
-			if (cmd == IDM_COPY_CELL || cmd == IDM_COPY_ROWS || cmd == IDM_COPY_COLUMN) {
+			if (cmd == IDM_COPY_CELL || cmd == IDM_COPY_ROWS || cmd == IDM_COPY_COLUMN || cmd == IDM_COPY_AS_JSON) {
 				HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 				HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
 				HWND hHeader = ListView_GetHeader(hGridWnd);
@@ -651,7 +655,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 					cmd == IDM_COPY_CELL && colNo >= colCount || 
 					cmd == IDM_COPY_COLUMN && colNo == -1 || 
 					cmd == IDM_COPY_COLUMN && colNo >= colCount || 					
-					cmd == IDM_COPY_ROWS && selCount == 0) {
+					cmd == IDM_COPY_ROWS && selCount == 0 ||
+					cmd == IDM_COPY_AS_JSON && selCount == 0) {
 					setClipboardText(TEXT(""));
 					return 0;
 				}
@@ -681,7 +686,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 						len += _tcslen(cache[resultset[rowNo]][colNo]) + 1 /* \n */;
 						rowNo = selCount < 2 ? rowNo + 1 : ListView_GetNextItem(hGridWnd, rowNo, LVNI_SELECTED);
 					} 
-				}	
+				}
 
 				TCHAR* buf = calloc(len + 1, sizeof(TCHAR));
 				if (cmd == IDM_COPY_CELL)
@@ -713,6 +718,69 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							buf[pos + len] = TEXT('\n');
 						pos += len + 1;								
 					} 
+				}
+				
+				if (cmd == IDM_COPY_AS_JSON) {						
+					char** colNames8 = calloc(colCount, sizeof(char*));
+					for (int colNo = 0; colNo < colCount; colNo++) {
+						TCHAR colName[255];
+						Header_GetItemText(hHeader, colNo, colName, 255);
+						colNames8[colNo] = utf16to8(colName);	
+					}	
+					
+					// 0 - key1 | key2 | key3 | ... --> [{"key1": "value1", "key2": "value2", ...}, {...}, ...]
+					// 1 - Element --> ["value1", "value2", ...]
+					// 2 - Attribute | Value -> {"attr1" : "value1", "attr2": "value2", ...}
+					// 3 - Value -> single value
+					int gridType = colCount == 1 && strcmp(colNames8[0], "Element") == 0 ? 1 :
+						colCount == 2 && strcmp(colNames8[0], "Attribute") == 0 ? 2 :
+						colCount == 1 && strcmp(colNames8[0], "Value") == 0 ? 3 :
+						0;
+					
+					JSON_Value* json = gridType == 0 || gridType == 1 ? json_value_init_array() : gridType == 2 ? json_value_init_object() : 0;
+						
+					int rowNo = ListView_GetNextItem(hGridWnd, -1, LVNI_SELECTED);
+					while (rowNo != -1) {
+						if (gridType == 0) {
+							JSON_Value* json2 = json_value_init_object();
+							for (int colNo = 0; colNo < colCount; colNo++) {
+								char* value8 = utf16to8(cache[resultset[rowNo]][colNo]);
+								json_object_set_string(json_value_get_object(json2), colNames8[colNo], value8);
+								free(value8);
+							}
+							json_array_append_value(json_value_get_array(json), json2);
+						}
+						
+						if (gridType == 1) {
+							char* value8 = utf16to8(cache[resultset[rowNo]][0]);
+							json_array_append_string(json_value_get_array(json), value8);
+							free(value8);
+						}
+						
+						if (gridType == 2) {
+							char* attr8 = utf16to8(cache[resultset[rowNo]][0]);
+							char* value8 = utf16to8(cache[resultset[rowNo]][1]);
+							json_object_set_string(json_value_get_object(json), attr8, value8);
+							free(attr8);
+							free(value8);
+						}
+					
+						rowNo = ListView_GetNextItem(hGridWnd, rowNo, LVNI_SELECTED);	
+					}
+					
+					if (json) {
+						free(buf);
+						char* json8 = HIWORD(GetKeyState(VK_CONTROL)) ? json_serialize_to_string(json) : json_serialize_to_string_pretty(json);					
+						buf = utf8to16(json8);
+						json_free_serialized_string(json8);
+						json_value_free(json);
+					} else {
+						PostMessage(hWnd, WM_COMMAND, IDM_COPY_CELL, 0);
+					}
+					
+					for (int colNo = 0; colNo < colCount; colNo++)
+						free(colNames8[colNo]);
+					free(colNames8);	
 				}
 									
 				setClipboardText(buf);
@@ -882,6 +950,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
 			HWND hStatusWnd = GetDlgItem(hWnd, IDC_STATUSBAR);
 			int filterAlign = *(int*)GetProp(hWnd, TEXT("FILTERALIGN"));
+			BOOL keepFilters = HIWORD(GetKeyState(VK_SHIFT)) && HIWORD(GetKeyState(VK_CONTROL));;
 
 			HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);
 			JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
@@ -892,12 +961,9 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			SendMessage(hWnd, WMU_SET_CURRENT_CELL, 0, 0);		
 			*(int*)GetProp(hWnd, TEXT("ORDERBY")) = 0;
 
-			int colCount = Header_GetItemCount(hHeader);
-			for (int colNo = 0; colNo < colCount; colNo++)
-				DestroyWindow(GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo));
-
-			for (int colNo = 0; colNo < colCount; colNo++)
-				ListView_DeleteColumn(hGridWnd, colCount - colNo - 1);
+			int prevColCount = Header_GetItemCount(hHeader);
+			for (int colNo = 0; colNo < prevColCount; colNo++)
+				ListView_DeleteColumn(hGridWnd, prevColCount - colNo - 1);
 
 			// Columns
 			if (type == JSONArray) {
@@ -924,16 +990,23 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				ListView_AddColumn(hGridWnd, TEXT("Value"));
 			}
 
-			colCount = Header_GetItemCount(hHeader);
+			int colCount = Header_GetItemCount(hHeader);
 			int align = filterAlign == -1 ? ES_LEFT : filterAlign == 1 ? ES_RIGHT : ES_CENTER;
 			for (int colNo = 0; colNo < colCount; colNo++) {
+				TCHAR buf[255] = {0};
+				GetDlgItemText(hHeader, IDC_HEADER_EDIT + colNo, buf, 255);
+				DestroyWindow(GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo));
+				
 				// Use WS_BORDER to vertical text aligment
-				HWND hEdit = CreateWindowEx(WS_EX_TOPMOST, WC_EDIT, NULL, align | ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_BORDER,
+				HWND hEdit = CreateWindowEx(WS_EX_TOPMOST, WC_EDIT, keepFilters ? buf : NULL, align | ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_BORDER,
 					0, 0, 0, 0, hHeader, (HMENU)(INT_PTR)(IDC_HEADER_EDIT + colNo), GetModuleHandle(0), NULL);
 				SendMessage(hEdit, WM_SETFONT, (LPARAM)GetProp(hWnd, TEXT("FONT")), TRUE);
 				SetProp(hEdit, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)cbNewFilterEdit));
 			}
-
+			
+			for (int colNo = colCount; colNo < prevColCount; colNo++)
+				DestroyWindow(GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo));
+				
 			// Cache data
 			int* pTotalRowCount = (int*)GetProp(hWnd, TEXT("TOTALROWCOUNT"));
 			int rowCount = 0;
