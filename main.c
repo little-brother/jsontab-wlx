@@ -28,6 +28,10 @@
 #define WMU_SET_THEME          WM_USER + 9
 #define WMU_UPDATE_TEXT        WM_USER + 10
 #define WMU_UPDATE_HIGHLIGHT   WM_USER + 11
+#define WMU_HIDE_COLUMN        WM_USER + 12
+#define WMU_SHOW_COLUMNS       WM_USER + 13
+#define WMU_HOT_KEYS           WM_USER + 14  
+#define WMU_HOT_CHARS          WM_USER + 15
 
 #define IDC_MAIN               100
 #define IDC_TREE               101
@@ -45,6 +49,8 @@
 #define IDM_DARK_THEME         5005
 #define IDM_COPY_TEXT          5010
 #define IDM_SELECTALL          5011
+#define IDM_COPY_JSONPATH      5020
+#define IDM_HIDE_COLUMN        5022
 
 #define SB_VERSION             0
 #define SB_CODEPAGE            1
@@ -58,7 +64,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("0.9.8")
+#define APP_VERSION            TEXT("0.9.9")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -78,12 +84,14 @@ typedef struct {
 static TCHAR iniPath[MAX_PATH] = {0};
 
 LRESULT CALLBACK cbNewMain (HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK cbNewHeader(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK cbNewFilterEdit(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK cbNewTab(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK cbNewText(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 char* json_value_get_as_string(const JSON_Value* val);
+char* json_get_path(const JSON_Value* val);
 BOOL addNode(HWND hTreeWnd, HTREEITEM hParentItem, JSON_Value* val);
 int highlightBlock(HWND hWnd, TCHAR* text, int start);
 HWND getMainWindow(HWND hWnd);
@@ -195,7 +203,7 @@ int __stdcall ListSearchTextW(HWND hWnd, TCHAR* searchString, int searchParamete
 			}
 			colNo = pos != -1 ? colNo - 1 : 0;
 			rowNo += pos != -1 ? 0 : isBackward ? -1 : 1; 	
-		} while ((pos == -1) && (isBackward ? rowNo > 0 : rowNo < rowCount - 1));
+		} while ((pos == -1) && (isBackward ? rowNo > 0 : rowNo < rowCount));
 		ListView_SetItemState(hGridWnd, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
 	
 		TCHAR buf[256] = {0};
@@ -373,11 +381,18 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	SetProp(hTextWnd, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hTextWnd, GWLP_WNDPROC, (LONG_PTR)cbNewText));
 	TabCtrl_SetCurSel(hTabWnd, tabNo);
 
+	HMENU hTreeMenu = CreatePopupMenu();
+	AppendMenu(hTreeMenu, MF_STRING, IDM_COPY_JSONPATH, TEXT("Copy JSONPath"));
+	SetProp(hMainWnd, TEXT("TREEMENU"), hTreeMenu);
+
 	HMENU hGridMenu = CreatePopupMenu();
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_CELL, TEXT("Copy cell"));
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_ROWS, TEXT("Copy row(s)"));
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_COLUMN, TEXT("Copy column"));	
 	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_AS_JSON, TEXT("Copy as json"));	
+	AppendMenu(hGridMenu, MF_STRING, IDM_COPY_JSONPATH, TEXT("Copy JSONPath"));	
+	AppendMenu(hGridMenu, MF_STRING, 0, NULL);
+	AppendMenu(hGridMenu, MF_STRING, IDM_HIDE_COLUMN, TEXT("Hide column"));	
 	AppendMenu(hGridMenu, MF_STRING, 0, NULL);	
 	AppendMenu(hGridMenu, (*(int*)GetProp(hMainWnd, TEXT("FILTERROW")) != 0 ? MF_CHECKED : 0) | MF_STRING, IDM_FILTER_ROW, TEXT("Filters"));		
 	AppendMenu(hGridMenu, (*(int*)GetProp(hMainWnd, TEXT("DARKTHEME")) != 0 ? MF_CHECKED : 0) | MF_STRING, IDM_DARK_THEME, TEXT("Dark theme"));					
@@ -455,6 +470,7 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 	DeleteObject(GetProp(hWnd, TEXT("BACKBRUSH")));	
 	DeleteObject(GetProp(hWnd, TEXT("FILTERBACKBRUSH")));
 	DeleteObject(GetProp(hWnd, TEXT("SPLITTERBRUSH")));
+	DestroyMenu(GetProp(hWnd, TEXT("TREEMENU")));	
 	DestroyMenu(GetProp(hWnd, TEXT("GRIDMENU")));
 	DestroyMenu(GetProp(hWnd, TEXT("TEXTMENU")));
 
@@ -492,6 +508,7 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 	RemoveProp(hWnd, TEXT("BACKBRUSH"));
 	RemoveProp(hWnd, TEXT("FILTERBACKBRUSH"));		
 	RemoveProp(hWnd, TEXT("SPLITTERBRUSH"));
+	RemoveProp(hWnd, TEXT("TREEMENU"));	
 	RemoveProp(hWnd, TEXT("GRIDMENU"));
 	RemoveProp(hWnd, TEXT("TEXTMENU"));
 
@@ -604,36 +621,30 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		break;
 		
 		case WM_KEYDOWN: {
-			if (wParam == VK_TAB) {
-				HWND hFocus = GetFocus();
-				HWND wnds[1000] = {0};
-				EnumChildWindows(hWnd, (WNDENUMPROC)cbEnumTabStopChildren, (LPARAM)wnds);
-
-				int no = 0;
-				while(wnds[no] && wnds[no] != hFocus)
-					no++;
-
-				int cnt = no;
-				while(wnds[cnt])
-					cnt++;
-
-				BOOL isBackward = HIWORD(GetKeyState(VK_CONTROL));
-				no += isBackward ? -1 : 1;
-				SetFocus(wnds[no] && no >= 0 ? wnds[no] : (isBackward ? wnds[cnt - 1] : wnds[0]));
-				return TRUE;
-			}
-			
-			if (wParam == VK_F1) {
-				ShellExecute(0, 0, TEXT("https://github.com/little-brother/jsontab-wlx/wiki"), 0, 0 , SW_SHOW);
-				return TRUE;
-			}
+			if (SendMessage(hWnd, WMU_HOT_KEYS, wParam, lParam))
+				return 0;
 		}
 		break;
 
 		case WM_CONTEXTMENU: {
 			POINT p = {LOWORD(lParam), HIWORD(lParam)};
-			if (GetDlgCtrlID(WindowFromPoint(p)) == IDC_TEXT)
+			int id = GetDlgCtrlID(WindowFromPoint(p));
+			if (id == IDC_TEXT)
 				TrackPopupMenu(GetProp(hWnd, TEXT("TEXTMENU")), TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN, p.x, p.y, 0, hWnd, NULL);
+			
+			if (id == IDC_TREE) {
+				HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);				
+				POINT p2 = {0};
+				GetCursorPos(&p2);
+				ScreenToClient(hTreeWnd, &p2);
+				TVHITTESTINFO thi = {p2, TVHT_ONITEM};
+				HTREEITEM hItem = TreeView_HitTest(hTreeWnd, &thi);
+				TreeView_SelectItem(hTreeWnd, hItem);
+				if (!hItem)
+					return 0;
+				
+				TrackPopupMenu(GetProp(hWnd, TEXT("TREEMENU")), TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN, p.x, p.y, 0, hWnd, NULL);
+			}				
 		}
 		break;
 
@@ -649,7 +660,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				int colCount = Header_GetItemCount(hHeader);
 				int rowCount = *(int*)GetProp(hWnd, TEXT("ROWCOUNT"));
 				int selCount = ListView_GetSelectedCount(hGridWnd);
-
+				
 				if (rowNo == -1 ||
 					rowNo >= rowCount ||
 					colCount == 0 ||
@@ -668,6 +679,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				if (!resultset)
 					return 0;
 
+				TCHAR* delimiter = getStoredString(TEXT("column-delimiter"), TEXT("\t"));
+
 				int len = 0;
 				if (cmd == IDM_COPY_CELL) 
 					len = _tcslen(cache[resultset[rowNo]][colNo]);
@@ -677,7 +690,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 					while (rowNo != -1) {
 						for (int colNo = 0; colNo < colCount; colNo++) {
 							if (ListView_GetColumnWidth(hGridWnd, colNo)) 
-								len += _tcslen(cache[resultset[rowNo]][colNo]) + 1; /* column delimiter: TAB */
+								len += _tcslen(cache[resultset[rowNo]][colNo]) + 1; /* column delimiter */
 						}
 													
 						len++; /* \n */		
@@ -705,7 +718,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							if (ListView_GetColumnWidth(hGridWnd, colNo)) {
 								int len = _tcslen(cache[resultset[rowNo]][colNo]);
 								_tcsncpy(buf + pos, cache[resultset[rowNo]][colNo], len);
-								buf[pos + len] = TEXT('\t');
+								buf[pos + len] = delimiter[0];
 								pos += len + 1;
 							}
 						}
@@ -796,6 +809,38 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 									
 				setClipboardText(buf);
 				free(buf);
+				free(delimiter);
+			}
+			
+			if (cmd == IDM_COPY_JSONPATH) {
+				HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);			
+				HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
+				HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);			
+				
+				HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);
+				JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
+				if (GetFocus() == hGridWnd) {
+					int* resultset = (int*)GetProp(hWnd, TEXT("RESULTSET"));
+					int rowNo = *(int*)GetProp(hWnd, TEXT("CURRENTROWNO"));
+					rowNo = resultset[rowNo];
+				
+					JSON_Value_Type type = json_value_get_type(val);
+					if (type == JSONArray)
+						val = json_array_get_value(json_value_get_array(val), rowNo);
+					if (type == JSONObject)
+						val = json_object_get_value_at(json_value_get_object(val), rowNo);	
+				}
+									
+				char* path8 = json_get_path(val);
+				TCHAR* path16 = utf8to16(path8);
+				setClipboardText(path16);
+				free(path16);
+				free(path8);
+			}
+			
+			if (cmd == IDM_HIDE_COLUMN) {
+				int colNo = *(int*)GetProp(hWnd, TEXT("CURRENTCOLNO"));
+				SendMessage(hWnd, WMU_HIDE_COLUMN, colNo, 0);
 			}
 
 			if (cmd == IDM_COPY_TEXT || cmd == IDM_SELECTALL) {
@@ -848,23 +893,14 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 			if (pHdr->idFrom == IDC_GRID && pHdr->code == LVN_COLUMNCLICK) {
 				NMLISTVIEW* lv = (NMLISTVIEW*)lParam;
-				// Hide or sort the column
-				if (HIWORD(GetKeyState(VK_CONTROL))) {
-					HWND hGridWnd = pHdr->hwndFrom;
-					HWND hHeader = ListView_GetHeader(hGridWnd);
-					int colNo = lv->iSubItem;
+				if (HIWORD(GetKeyState(VK_CONTROL))) 
+					return SendMessage(hWnd, WMU_HIDE_COLUMN, lv->iSubItem, 0);
 					
-					HWND hEdit = GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo);
-					SetWindowLongPtr(hEdit, GWLP_USERDATA, (LONG_PTR)ListView_GetColumnWidth(hGridWnd, colNo));				
-					ListView_SetColumnWidth(pHdr->hwndFrom, colNo, 0); 
-					InvalidateRect(hHeader, NULL, TRUE);
-				} else {
-					int colNo = lv->iSubItem + 1;
-					int* pOrderBy = (int*)GetProp(hWnd, TEXT("ORDERBY"));
-					int orderBy = *pOrderBy;
-					*pOrderBy = colNo == orderBy || colNo == -orderBy ? -orderBy : colNo;
-					SendMessage(hWnd, WMU_UPDATE_RESULTSET, 0, 0);				
-				}				
+				int colNo = lv->iSubItem + 1;
+				int* pOrderBy = (int*)GetProp(hWnd, TEXT("ORDERBY"));
+				int orderBy = *pOrderBy;
+				*pOrderBy = colNo == orderBy || colNo == -orderBy ? -orderBy : colNo;
+				SendMessage(hWnd, WMU_UPDATE_RESULTSET, 0, 0);				
 			}
 
 			if (pHdr->idFrom == IDC_GRID && (pHdr->code == (DWORD)NM_CLICK || pHdr->code == (DWORD)NM_RCLICK)) {
@@ -920,17 +956,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				}
 
 				if (kd->wVKey == 0x20 && HIWORD(GetKeyState(VK_CONTROL))) { // Ctrl + Space				
-					HWND hGridWnd = pHdr->hwndFrom;
-					HWND hHeader = ListView_GetHeader(hGridWnd);
-					int colCount = Header_GetItemCount(ListView_GetHeader(pHdr->hwndFrom));
-					for (int colNo = 0; colNo < colCount; colNo++) {
-						if (ListView_GetColumnWidth(hGridWnd, colNo) == 0) {
-							HWND hEdit = GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo);
-							ListView_SetColumnWidth(hGridWnd, colNo, (int)GetWindowLongPtr(hEdit, GWLP_USERDATA));
-						}
-					}
-
-					InvalidateRect(hGridWnd, NULL, TRUE);					
+					SendMessage(hWnd, WMU_SHOW_COLUMNS, 0, 0);
 					return TRUE;
 				}				
 				
@@ -990,8 +1016,38 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			}				
 		}
 		break;
+		
+		// wParam = colNo
+		case WMU_HIDE_COLUMN: {
+			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
+			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);		
+			HWND hHeader = ListView_GetHeader(hGridWnd);
+			int colNo = (int)wParam;
 
-		case WMU_UPDATE_GRID: {
+			HWND hEdit = GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo);
+			SetWindowLongPtr(hEdit, GWLP_USERDATA, (LONG_PTR)ListView_GetColumnWidth(hGridWnd, colNo));				
+			ListView_SetColumnWidth(hGridWnd, colNo, 0); 
+			InvalidateRect(hHeader, NULL, TRUE);			
+		}
+		break;	
+		
+		case WMU_SHOW_COLUMNS: {
+			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
+			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
+			HWND hHeader = ListView_GetHeader(hGridWnd);
+			int colCount = Header_GetItemCount(ListView_GetHeader(hGridWnd));
+			for (int colNo = 0; colNo < colCount; colNo++) {
+				if (ListView_GetColumnWidth(hGridWnd, colNo) == 0) {
+					HWND hEdit = GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo);
+					ListView_SetColumnWidth(hGridWnd, colNo, (int)GetWindowLongPtr(hEdit, GWLP_USERDATA));
+				}
+			}
+
+			InvalidateRect(hGridWnd, NULL, TRUE);		
+		}
+		break;			
+
+		case WMU_UPDATE_GRID: {	
 			HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
@@ -1250,7 +1306,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		}
 		break;
 		
-		case WMU_UPDATE_TEXT: {
+		case WMU_UPDATE_TEXT: {	
 			HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
@@ -1553,7 +1609,73 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			InvalidateRect(hWnd, NULL, TRUE);	
 		}
 		break;
+		
+		case WMU_HOT_KEYS: {
+			BOOL isCtrl = HIWORD(GetKeyState(VK_CONTROL));
+			if (wParam == VK_TAB) {
+				HWND hFocus = GetFocus();
+				HWND wnds[1000] = {0};
+				EnumChildWindows(hWnd, (WNDENUMPROC)cbEnumTabStopChildren, (LPARAM)wnds);
+
+				int no = 0;
+				while(wnds[no] && wnds[no] != hFocus)
+					no++;
+
+				int cnt = no;
+				while(wnds[cnt])
+					cnt++;
+
+				no += isCtrl ? -1 : 1;
+				SetFocus(wnds[no] && no >= 0 ? wnds[no] : (isCtrl ? wnds[cnt - 1] : wnds[0]));
+			}
+			
+			if (wParam == VK_F1) {
+				ShellExecute(0, 0, TEXT("https://github.com/little-brother/jsontab-wlx/wiki"), 0, 0 , SW_SHOW);
+				return TRUE;
+			}
+			
+			if (wParam == 0x20 && isCtrl) { // Ctrl + Space
+				SendMessage(hWnd, WMU_SHOW_COLUMNS, 0, 0);
+				return TRUE;
+			}
+			
+			if (wParam == VK_ESCAPE || wParam == VK_F11 ||
+				wParam == VK_F3 || wParam == VK_F5 || wParam == VK_F7 || (isCtrl && wParam == 0x46) || // Ctrl + F
+				((wParam >= 0x31 && wParam <= 0x38) && !getStoredValue(TEXT("disable-num-keys"), 0) || // 1 - 8
+				(wParam == 0x4E || wParam == 0x50) && !getStoredValue(TEXT("disable-np-keys"), 0)) && // N, P
+				GetDlgCtrlID(GetFocus()) / 100 * 100 != IDC_HEADER_EDIT) { 
+				SetFocus(GetParent(hWnd));		
+				keybd_event(wParam, wParam, KEYEVENTF_EXTENDEDKEY, 0);
+
+				return TRUE;
+			}			
+			
+			return FALSE;					
+		}
+		break;
+		
+		case WMU_HOT_CHARS: {
+			BOOL isCtrl = HIWORD(GetKeyState(VK_CONTROL));
+			return !_istprint(wParam) && (
+				wParam == VK_ESCAPE || wParam == VK_F11 || wParam == VK_F1 ||
+				wParam == VK_F3 || wParam == VK_F5 || wParam == VK_F7) ||
+				wParam == VK_TAB || wParam == VK_RETURN ||
+				isCtrl && (wParam == 0x46 || wParam == 0x20);
+		}
+		break;		
 	}
+	
+	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	if (msg == WM_KEYDOWN && SendMessage(getMainWindow(hWnd), WMU_HOT_KEYS, wParam, lParam))
+		return 0;
+
+	// Prevent beep
+	if (msg == WM_CHAR && SendMessage(getMainWindow(hWnd), WMU_HOT_CHARS, wParam, lParam))
+		return 0;	
+
 	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
 }
 
@@ -1613,19 +1735,22 @@ LRESULT CALLBACK cbNewFilterEdit(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 		}
 		break;
 
-		case WM_CHAR: {
-			return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);
-		}
-		break;
-
 		case WM_KEYDOWN: {
+			HWND hMainWnd = getMainWindow(hWnd);
 			if (wParam == VK_RETURN) {
-				SendMessage(getMainWindow(hWnd), WMU_UPDATE_RESULTSET, 0, 0);
-				return 0;
+				SendMessage(hMainWnd, WMU_UPDATE_RESULTSET, 0, 0);
+				return 0;			
 			}
 			
-			if (wParam == VK_TAB || wParam == VK_ESCAPE)
-				return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);		
+			if (SendMessage(hMainWnd, WMU_HOT_KEYS, wParam, lParam))
+				return 0;
+		}
+		break;
+	
+		// Prevent beep
+		case WM_CHAR: {
+			if (SendMessage(getMainWindow(hWnd), WMU_HOT_CHARS, wParam, lParam))
+				return 0;	
 		}
 		break;
 
@@ -1644,6 +1769,13 @@ LRESULT CALLBACK cbNewTab(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		if (pHdr->idFrom == IDC_GRID && pHdr->code == (UINT)NM_CUSTOMDRAW)
 			return SendMessage(GetParent(hWnd), msg, wParam, lParam);
 	}
+	
+	if (msg == WM_KEYDOWN && SendMessage(getMainWindow(hWnd), WMU_HOT_KEYS, wParam, lParam))
+		return 0;
+
+	// Prevent beep
+	if (msg == WM_CHAR && SendMessage(getMainWindow(hWnd), WMU_HOT_CHARS, wParam, lParam))
+		return 0;	
 
 	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
 }
@@ -1658,34 +1790,13 @@ LRESULT CALLBACK cbNewText(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		return 0;
 	}
 	
-	if (msg == WM_KEYDOWN) { 
-		return CallWindowProc(cbHotKey, hWnd, msg, wParam, lParam);
-	}
-
-	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
-}
-
-LRESULT CALLBACK cbHotKey(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-	if (msg == WM_KEYDOWN && (
-		wParam == VK_TAB || wParam == VK_ESCAPE || 
-		wParam == VK_F3 || wParam == VK_F5 || wParam == VK_F7 || (HIWORD(GetKeyState(VK_CONTROL)) && wParam == 0x46) || // Ctrl + F
-		wParam == VK_F1 || wParam == VK_F11 ||
-		(wParam >= 0x31 && wParam <= 0x38) && !getStoredValue(TEXT("disable-num-keys"), 0) || // 1 - 8
-		(wParam == 0x4E || wParam == 0x50) && !getStoredValue(TEXT("disable-np-keys"), 0))) { // N, P
-		HWND hMainWnd = getMainWindow(hWnd);
-		if (wParam == VK_TAB || wParam == VK_F1) { 
-			SendMessage(hMainWnd, WM_KEYDOWN, wParam, lParam);
-		} else {
-			SetFocus(GetParent(hMainWnd));		
-			keybd_event(wParam, wParam, KEYEVENTF_EXTENDEDKEY, 0);
-		}
+	if (msg == WM_KEYDOWN && SendMessage(getMainWindow(hWnd), WMU_HOT_KEYS, wParam, lParam))
 		return 0;
-	}
-	
+
 	// Prevent beep
-	if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB))
+	if (msg == WM_CHAR && SendMessage(getMainWindow(hWnd), WMU_HOT_CHARS, wParam, lParam))
 		return 0;
-	
+
 	return CallWindowProc((WNDPROC)GetProp(hWnd, TEXT("WNDPROC")), hWnd, msg, wParam, lParam);
 }
 
@@ -1710,6 +1821,46 @@ char* json_value_get_as_string(const JSON_Value* val) {
 		json_free_serialized_string(str);
 	}
 
+	return res;
+}
+
+char* json_get_path(const JSON_Value* val) {
+	char* res = calloc(1024, sizeof(char));
+
+	JSON_Value* cval = (JSON_Value*)val;
+	JSON_Value* pval = json_value_get_parent (cval);
+	while (pval) {
+		int ctype = json_value_get_type(cval);
+		int ptype = json_value_get_type(pval);
+
+		JSON_Array* parray = json_value_get_array(pval);
+		JSON_Object* pobject = json_value_get_object(pval);
+
+		int no = 0;
+		int cnt = ptype == JSONArray ? json_array_get_count(parray) : ptype == JSONObject ? json_object_get_count(pobject) : 0;
+		for (no = 0; cnt > 1 && no < cnt; no++) {
+			JSON_Value* v =
+				ptype == JSONArray ? json_array_get_value(parray, no) :
+				ptype == JSONObject ? json_object_get_value_at(pobject, no) :
+				0;
+			if (v == cval)
+				break;
+		}
+		
+		cval = pval;
+		pval = json_value_get_parent (cval);
+
+		char* tmp = calloc(strlen(res) + 1024, sizeof(char));
+		if (ptype == JSONArray)
+			sprintf(tmp, "%s[%i]%s", pval ? "" : ".", no, res);
+		if (ptype == JSONObject)
+			sprintf(tmp, "%s%s%s", pval ? "." : "..", json_object_get_name(pobject, no), res);
+		free(res);
+		res = tmp;
+	}
+
+
+	res[0] = '$';
 	return res;
 }
 

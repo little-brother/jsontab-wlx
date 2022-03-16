@@ -1,8 +1,8 @@
 /*
  SPDX-License-Identifier: MIT
 
- Parson 1.2.1 ( http://kgabis.github.com/parson/ )
- Copyright (c) 2012 - 2021 Krzysztof Gabis
+ Parson 1.4.0 (https://github.com/kgabis/parson)
+ Copyright (c) 2012 - 2022 Krzysztof Gabis
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
@@ -31,8 +31,8 @@
 #include "parson.h"
 
 #define PARSON_IMPL_VERSION_MAJOR 1
-#define PARSON_IMPL_VERSION_MINOR 2
-#define PARSON_IMPL_VERSION_PATCH 1
+#define PARSON_IMPL_VERSION_MINOR 4
+#define PARSON_IMPL_VERSION_PATCH 0
 
 #if (PARSON_VERSION_MAJOR != PARSON_IMPL_VERSION_MAJOR)\
 || (PARSON_VERSION_MINOR != PARSON_IMPL_VERSION_MINOR)\
@@ -63,8 +63,13 @@
 #define STARTING_CAPACITY 16
 #define MAX_NESTING       2048
 
-#define FLOAT_FORMAT "%1.17g" /* do not increase precision without incresing NUM_BUF_SIZE */
-#define NUM_BUF_SIZE 64 /* double printed with "%1.17g" shouldn't be longer than 25 bytes so let's be paranoid and use 64 */
+#ifndef PARSON_DEFAULT_FLOAT_FORMAT
+#define PARSON_DEFAULT_FLOAT_FORMAT "%1.17g" /* do not increase precision without incresing NUM_BUF_SIZE */
+#endif
+
+#ifndef PARSON_NUM_BUF_SIZE
+#define PARSON_NUM_BUF_SIZE 64 /* double printed with "%1.17g" shouldn't be longer than 25 bytes so let's be paranoid and use 64 */
+#endif
 
 #define SIZEOF_TOKEN(a)       (sizeof(a) - 1)
 #define SKIP_CHAR(str)        ((*str)++)
@@ -86,6 +91,8 @@ static JSON_Malloc_Function parson_malloc = malloc;
 static JSON_Free_Function parson_free = free;
 
 static int parson_escape_slashes = 1;
+
+static char *parson_float_format = NULL;
 
 #define IS_CONT(b) (((unsigned char)(b) & 0xC0) == 0x80) /* is utf-8 continuation byte */
 
@@ -589,7 +596,7 @@ static JSON_Status json_object_add(JSON_Object *object, char *name, JSON_Value *
 static JSON_Value * json_object_getn_value(const JSON_Object *object, const char *name, size_t name_len) {
     unsigned long hash = 0;
     parson_bool_t found = PARSON_FALSE;
-    unsigned long cell_ix = 0;
+    size_t cell_ix = 0;
     size_t item_ix = 0;
     if (!object || !name) {
         return NULL;
@@ -973,6 +980,9 @@ static JSON_Value * parse_object_value(const char **string, size_t nesting) {
         }
         SKIP_CHAR(string);
         SKIP_WHITESPACES(string);
+        if (**string == '}') {
+            break;
+        }
     }
     SKIP_WHITESPACES(string);
     if (**string != '}') {
@@ -1018,6 +1028,9 @@ static JSON_Value * parse_array_value(const char **string, size_t nesting) {
         }
         SKIP_CHAR(string);
         SKIP_WHITESPACES(string);
+        if (**string == ']') {
+            break;
+        }
     }
     SKIP_WHITESPACES(string);
     if (**string != ']' || /* Trim array after parsing is over */
@@ -1212,7 +1225,11 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
             if (buf != NULL) {
                 num_buf = buf;
             }
-            written = sprintf(num_buf, FLOAT_FORMAT, num);
+            if (parson_float_format) {
+                written = sprintf(num_buf, parson_float_format, num);
+            } else {
+                written = sprintf(num_buf, PARSON_DEFAULT_FLOAT_FORMAT, num);
+            }
             if (written < 0) {
                 return -1;
             }
@@ -1757,7 +1774,7 @@ JSON_Value * json_value_deep_copy(const JSON_Value *value) {
 }
 
 size_t json_serialization_size(const JSON_Value *value) {
-    char num_buf[NUM_BUF_SIZE]; /* recursively allocating buffer on stack is a bad idea, so let's do it only once */
+    char num_buf[PARSON_NUM_BUF_SIZE]; /* recursively allocating buffer on stack is a bad idea, so let's do it only once */
     int res = json_serialize_to_buffer_r(value, NULL, 0, PARSON_FALSE, num_buf);
     return res < 0 ? 0 : (size_t)(res) + 1;
 }
@@ -1817,7 +1834,7 @@ char * json_serialize_to_string(const JSON_Value *value) {
 }
 
 size_t json_serialization_size_pretty(const JSON_Value *value) {
-    char num_buf[NUM_BUF_SIZE]; /* recursively allocating buffer on stack is a bad idea, so let's do it only once */
+    char num_buf[PARSON_NUM_BUF_SIZE]; /* recursively allocating buffer on stack is a bad idea, so let's do it only once */
     int res = json_serialize_to_buffer_r(value, NULL, 0, PARSON_TRUE, num_buf);
     return res < 0 ? 0 : (size_t)(res) + 1;
 }
@@ -2421,4 +2438,15 @@ void json_set_allocation_functions(JSON_Malloc_Function malloc_fun, JSON_Free_Fu
 
 void json_set_escape_slashes(int escape_slashes) {
     parson_escape_slashes = escape_slashes;
+}
+
+void json_set_float_serialization_format(const char *format) {
+    if (parson_float_format) {
+        parson_free(parson_float_format);
+    }
+    if (!format) {
+        parson_float_format = NULL;
+        return;
+    }
+    parson_float_format = parson_strdup(format);
 }
