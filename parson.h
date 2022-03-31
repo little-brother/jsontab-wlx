@@ -94,6 +94,9 @@ JSON_Value * json_parse_string(const char *string);
     returns NULL in case of error */
 JSON_Value * json_parse_string_with_comments(const char *string);
 
+JSON_Value * json_parse_string_v2(const char *string, int mode, int* isMalformed);
+JSON_Value * json_parse_string_with_comments_v2(const char *string, int mode, int* isMalformed);
+
 /* Serialization */
 size_t      json_serialization_size(const JSON_Value *value); /* returns 0 on fail */
 JSON_Status json_serialize_to_buffer(const JSON_Value *value, char *buf, size_t buf_size_in_bytes);

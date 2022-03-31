@@ -1382,6 +1382,134 @@ JSON_Value * json_parse_string_with_comments(const char *string) {
     return result;
 }
 
+JSON_Value * parse_roots(const char **string, int* isMalformed) {
+    JSON_Value *first_root = NULL, *next_root = NULL, *fake_root = NULL;
+    JSON_Array *fake_root_array = NULL;
+    first_root = parse_value(string, 0);
+    if (first_root == NULL) {
+        return NULL;
+    }
+    SKIP_WHITESPACES(string);
+    /* assume null character is end of string, null character between root elements not supported */
+    if (**string == '\0') { /* only one root element found, we are finished */
+        return first_root;
+    }
+    fake_root = json_value_init_array(); /* create fake root array to hold multiple root elements */
+    if (fake_root == NULL) {
+        json_value_free(first_root);
+        return NULL;
+    }
+    fake_root_array = json_value_get_array(fake_root);
+    if (isMalformed)
+    	*isMalformed = 1;
+    	
+    if (json_array_add(fake_root_array, first_root) != JSONSuccess) { /* add first root element */
+        json_value_free(first_root);
+        json_value_free(fake_root);
+        return NULL;
+    }
+    while (strchr("{[\"\f\t\n-0123456789", **string) != NULL ) { /* next root element */
+        next_root = parse_value(string, 0); /* get next root element */
+        if (next_root == NULL) {
+            json_value_free(fake_root);
+            return NULL;
+        }
+        if (json_array_add(fake_root_array, next_root) != JSONSuccess) {
+            json_value_free(next_root);
+            json_value_free(fake_root);
+            return NULL;
+        }
+        SKIP_WHITESPACES(string);
+        /* assume null character is end of string, null character between roots not supported */
+        if (**string == '\0') { /* last root element added, we are finished */
+            return fake_root;
+        }
+    }
+    json_value_free(fake_root);
+    return NULL;
+}
+
+// mode: 0 - strict, 1 - allow multi-roots only, 2 - agressive parsing
+JSON_Value * parse_value_v2(const char **string, int mode, int* isMalformed) {
+	JSON_Value* res = NULL;
+	if (isMalformed)
+		*isMalformed = 0;
+	
+	if (mode == 0) {
+		res = parse_value(string, 0);
+		SKIP_WHITESPACES(string);
+		if (isMalformed)
+			*isMalformed = **string != '\0';
+	}
+	
+	if (mode == 1) {
+		res = parse_roots(string, isMalformed);
+	}
+	
+	if (mode == 2) {
+		JSON_Value* roots = json_value_init_array();
+		JSON_Array* array = json_value_get_array(roots);
+		        
+		while (**string != '\0') {
+		    JSON_Value *root = parse_value(string, 0);
+		
+		    if (!root) {
+		        while (**string != '\0' && **string != '{' && **string != '[')
+		            SKIP_CHAR(string);
+		        
+		        continue;
+		    }
+		        
+		    json_array_add(array, root);
+		}
+		
+		int cnt = json_array_get_count(array);
+		if (cnt == 0) {
+		    json_value_free(roots);
+		    res = NULL;
+		} else if (cnt == 1) {
+		    res = json_array_get_value(array, 0);
+		    
+		    // Replace by null and erase array
+		    JSON_Value* value = json_value_init_null();
+		    value->parent = json_array_get_wrapping_value(array);
+		    array->items[0] = value;
+		    json_value_free(roots);
+		} else {
+			if (isMalformed)
+				*isMalformed = 1;
+			res = roots;
+		}
+	}
+	
+	return res;
+}
+
+JSON_Value * json_parse_string_v2(const char *string, int mode, int* isMalformed) {
+    if (string == NULL) {
+        return NULL;
+    }
+    if (string[0] == '\xEF' && string[1] == '\xBB' && string[2] == '\xBF') {
+        string = string + 3; /* Support for UTF-8 BOM */
+    }
+    return parse_value_v2((const char**)&string, mode, isMalformed);
+}
+
+JSON_Value * json_parse_string_with_comments_v2(const char *string, int mode, int* isMalformed) {
+    JSON_Value *result = NULL;
+    char *string_mutable_copy = NULL, *string_mutable_copy_ptr = NULL;
+    string_mutable_copy = parson_strdup(string);
+    if (string_mutable_copy == NULL) {
+        return NULL;
+    }
+    remove_comments(string_mutable_copy, "/*", "*/");
+    remove_comments(string_mutable_copy, "//", "\n");
+    string_mutable_copy_ptr = string_mutable_copy;
+    result = parse_value_v2((const char**)&string_mutable_copy_ptr, mode, isMalformed);
+    parson_free(string_mutable_copy);
+    return result;
+}
+
 /* JSON Object API */
 
 JSON_Value * json_object_get_value(const JSON_Object *object, const char *name) {

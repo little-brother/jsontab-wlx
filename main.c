@@ -64,7 +64,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("0.9.9")
+#define APP_VERSION            TEXT("1.0.0")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -280,9 +280,11 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	}
 	
 	json_set_escape_slashes(0);
-	JSON_Value* json = json_parse_string(data + offset);
+	int mode = getStoredValue(TEXT("parse-mode"), 0);
+	int isMalformed = 0;
+	JSON_Value* json = json_parse_string_v2(data + offset, mode, &isMalformed);
 	if (!json)
-		json = json_parse_string_with_comments(data + offset);
+		json = json_parse_string_with_comments_v2(data + offset, mode, &isMalformed);
 	free(data);
 	if (!json)
 		return 0;
@@ -413,13 +415,13 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 		
 	SendMessage(hMainWnd, WMU_SET_FONT, 0, 0);
 	SendMessage(hMainWnd, WMU_SET_THEME, 0, 0);
-	HTREEITEM hRoot = TreeView_AddItem(hTreeWnd, TEXT("<<root>>"), TVI_ROOT, (LPARAM)json);
+	HTREEITEM hRoot = TreeView_AddItem(hTreeWnd, isMalformed ? TEXT("<<malformed>>") : TEXT("<<root>>"), TVI_ROOT, (LPARAM)json);
 	addNode(hTreeWnd, hRoot, json);
 	TreeView_Expand(hTreeWnd, hRoot, TVE_EXPAND);
 	TreeView_Select(hTreeWnd, hRoot, TVGN_CARET);
 	ShowWindow(hMainWnd, SW_SHOW);
 	SetFocus(hTreeWnd);
-
+	
 	return hMainWnd;
 }
 
@@ -1401,9 +1403,12 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				SendMessage(hWnd, WMU_UPDATE_FILTER_SIZE, 0, 0);											
 
 			// Bug fix: force Windows to redraw header
-			int w = ListView_GetColumnWidth(hGridWnd, 0);
-			ListView_SetColumnWidth(hGridWnd, 0, w + 1);
-			ListView_SetColumnWidth(hGridWnd, 0, w);			
+			if (IsWindowVisible(hGridWnd)) { // Win10x64, TCx32 
+				int w = ListView_GetColumnWidth(hGridWnd, 0);
+				ListView_SetColumnWidth(hGridWnd, 0, w + 1);
+				ListView_SetColumnWidth(hGridWnd, 0, w);			
+			}
+						
 			SendMessage(hWnd, WM_SETREDRAW, TRUE, 0);
 			InvalidateRect(hWnd, NULL, TRUE);
 		}
