@@ -64,7 +64,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("1.0.0")
+#define APP_VERSION            TEXT("1.0.1")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -369,7 +369,9 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	int tabNo = getStoredValue(TEXT("tab-no"), 0);
 	HWND hGridWnd = CreateWindow(WC_LISTVIEW, NULL, (tabNo == 0 ? WS_VISIBLE : 0) | WS_CHILD  | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA | WS_TABSTOP,
 		205, 0, 100, 100, hTabWnd, (HMENU)IDC_GRID, GetModuleHandle(0), NULL);
-	ListView_SetExtendedListViewStyle(hGridWnd, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+		
+	int noLines = getStoredValue(TEXT("disable-grid-lines"), 0);	
+	ListView_SetExtendedListViewStyle(hGridWnd, LVS_EX_FULLROWSELECT | (noLines ? 0 : LVS_EX_GRIDLINES) | LVS_EX_LABELTIP);
 	SetProp(hGridWnd, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hGridWnd, GWLP_WNDPROC, (LONG_PTR)cbHotKey));
 
 	HWND hHeader = ListView_GetHeader(hGridWnd);
