@@ -64,7 +64,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("1.0.1")
+#define APP_VERSION            TEXT("1.0.2")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -130,7 +130,11 @@ BOOL APIENTRY DllMain (HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 }
 
 void __stdcall ListGetDetectString(char* DetectString, int maxlen) {
-	snprintf(DetectString, maxlen, "MULTIMEDIA & ext=\"JSON\"");
+	TCHAR* detectString16 = getStoredString(TEXT("detect-string"), TEXT("MULTIMEDIA & ext=\"JSON\""));
+	char* detectString8 = utf16to8(detectString16);
+	snprintf(DetectString, maxlen, detectString8);
+	free(detectString16);
+	free(detectString8);	
 }
 
 void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps) {
@@ -1401,15 +1405,13 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			for (int colNo = 0; colNo < colCount; colNo++) 		
 				ShowWindow(GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo), isFilterRow ? SW_SHOW : SW_HIDE);
 
+			// Bug fix: force Windows to redraw header
+			int w = ListView_GetColumnWidth(hGridWnd, 0);
+			ListView_SetColumnWidth(hGridWnd, 0, w + 1);
+			ListView_SetColumnWidth(hGridWnd, 0, w);			
+
 			if (isFilterRow)				
 				SendMessage(hWnd, WMU_UPDATE_FILTER_SIZE, 0, 0);											
-
-			// Bug fix: force Windows to redraw header
-			if (IsWindowVisible(hGridWnd)) { // Win10x64, TCx32 
-				int w = ListView_GetColumnWidth(hGridWnd, 0);
-				ListView_SetColumnWidth(hGridWnd, 0, w + 1);
-				ListView_SetColumnWidth(hGridWnd, 0, w);			
-			}
 						
 			SendMessage(hWnd, WM_SETREDRAW, TRUE, 0);
 			InvalidateRect(hWnd, NULL, TRUE);
