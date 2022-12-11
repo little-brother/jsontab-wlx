@@ -64,7 +64,7 @@
 #define MAX_LENGTH             4096
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("1.0.2")
+#define APP_VERSION            TEXT("1.0.3")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -330,6 +330,8 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	SetProp(hMainWnd, TEXT("FILTERTEXTCOLOR"), calloc(1, sizeof(int)));
 	SetProp(hMainWnd, TEXT("FILTERBACKCOLOR"), calloc(1, sizeof(int)));	
 	SetProp(hMainWnd, TEXT("CURRENTCELLCOLOR"), calloc(1, sizeof(int)));
+	SetProp(hMainWnd, TEXT("SELECTIONTEXTCOLOR"), calloc(1, sizeof(int)));	
+	SetProp(hMainWnd, TEXT("SELECTIONBACKCOLOR"), calloc(1, sizeof(int)));
 	SetProp(hMainWnd, TEXT("SPLITTERCOLOR"), calloc(1, sizeof(int)));	
 	SetProp(hMainWnd, TEXT("JSONTEXTCOLOR"), calloc(1, sizeof(int)));		
 	SetProp(hMainWnd, TEXT("JSONKEYCOLOR"), calloc(1, sizeof(int)));
@@ -375,7 +377,7 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 		205, 0, 100, 100, hTabWnd, (HMENU)IDC_GRID, GetModuleHandle(0), NULL);
 		
 	int noLines = getStoredValue(TEXT("disable-grid-lines"), 0);	
-	ListView_SetExtendedListViewStyle(hGridWnd, LVS_EX_FULLROWSELECT | (noLines ? 0 : LVS_EX_GRIDLINES) | LVS_EX_LABELTIP);
+	ListView_SetExtendedListViewStyle(hGridWnd, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | (noLines ? 0 : LVS_EX_GRIDLINES) | LVS_EX_LABELTIP);
 	SetProp(hGridWnd, TEXT("WNDPROC"), (HANDLE)SetWindowLongPtr(hGridWnd, GWLP_WNDPROC, (LONG_PTR)cbHotKey));
 
 	HWND hHeader = ListView_GetHeader(hGridWnd);
@@ -466,7 +468,9 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 	free((int*)GetProp(hWnd, TEXT("BACKCOLOR2")));
 	free((int*)GetProp(hWnd, TEXT("FILTERTEXTCOLOR")));
 	free((int*)GetProp(hWnd, TEXT("FILTERBACKCOLOR")));
-	free((int*)GetProp(hWnd, TEXT("CURRENTCELLCOLOR")));	
+	free((int*)GetProp(hWnd, TEXT("CURRENTCELLCOLOR")));
+	free((int*)GetProp(hWnd, TEXT("SELECTIONTEXTCOLOR")));	
+	free((int*)GetProp(hWnd, TEXT("SELECTIONBACKCOLOR")));	
 	free((int*)GetProp(hWnd, TEXT("SPLITTERCOLOR")));
 	free((int*)GetProp(hWnd, TEXT("JSONTEXTCOLOR")));
 	free((int*)GetProp(hWnd, TEXT("JSONKEYCOLOR")));
@@ -506,7 +510,9 @@ void __stdcall ListCloseWindow(HWND hWnd) {
 	RemoveProp(hWnd, TEXT("BACKCOLOR2"));	
 	RemoveProp(hWnd, TEXT("FILTERTEXTCOLOR"));
 	RemoveProp(hWnd, TEXT("FILTERBACKCOLOR"));
-	RemoveProp(hWnd, TEXT("CURRENTCELLCOLOR"));	
+	RemoveProp(hWnd, TEXT("CURRENTCELLCOLOR"));
+	RemoveProp(hWnd, TEXT("SELECTIONTEXTCOLOR"));
+	RemoveProp(hWnd, TEXT("SELECTIONBACKCOLOR"));
 	RemoveProp(hWnd, TEXT("SPLITTERCOLOR"));
 	RemoveProp(hWnd, TEXT("JSONTEXTCOLOR"));	
 	RemoveProp(hWnd, TEXT("JSONKEYCOLOR"));		
@@ -985,39 +991,26 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			
 			if (pHdr->idFrom == IDC_GRID && pHdr->code == (UINT)NM_CUSTOMDRAW) {
 				int result = CDRF_DODEFAULT;
-
-				NMLVCUSTOMDRAW* pCustomDraw = (LPNMLVCUSTOMDRAW)lParam;
+				
+				NMLVCUSTOMDRAW* pCustomDraw = (LPNMLVCUSTOMDRAW)lParam;				
 				if (pCustomDraw->nmcd.dwDrawStage == CDDS_PREPAINT) 
 					result = CDRF_NOTIFYITEMDRAW;
 	
-				if (pCustomDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) 
-					result = CDRF_NOTIFYSUBITEMDRAW | CDRF_NEWFONT;
-	
-				if (pCustomDraw->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-					pCustomDraw->clrTextBk = pCustomDraw->nmcd.dwItemSpec % 2 == 0 ? *(int*)GetProp(hWnd, TEXT("BACKCOLOR")) : *(int*)GetProp(hWnd, TEXT("BACKCOLOR2"));
-					result = CDRF_NOTIFYPOSTPAINT;
+				if (pCustomDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+					if (ListView_GetItemState(pHdr->hwndFrom, pCustomDraw->nmcd.dwItemSpec, LVIS_SELECTED)) {
+						pCustomDraw->nmcd.uItemState &= ~CDIS_SELECTED;
+						result = CDRF_NOTIFYSUBITEMDRAW;
+					} else {
+						pCustomDraw->clrTextBk = *(int*)GetProp(hWnd, pCustomDraw->nmcd.dwItemSpec % 2 == 0 ? TEXT("BACKCOLOR") : TEXT("BACKCOLOR2"));
+					}				
 				}
-	
-				if ((pCustomDraw->nmcd.dwDrawStage == CDDS_POSTPAINT) | CDDS_SUBITEM) {
+				
+				if (pCustomDraw->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
 					int rowNo = *(int*)GetProp(hWnd, TEXT("CURRENTROWNO"));
 					int colNo = *(int*)GetProp(hWnd, TEXT("CURRENTCOLNO"));
-					if ((pCustomDraw->nmcd.dwItemSpec == (DWORD)rowNo) && (pCustomDraw->iSubItem == colNo)) {
-						HPEN hPen = CreatePen(PS_DOT, 1, *(int*)GetProp(hWnd, TEXT("CURRENTCELLCOLOR")));
-						HDC hDC = pCustomDraw->nmcd.hdc;
-						SelectObject(hDC, hPen);
-	
-						RECT rc = {0};
-						ListView_GetSubItemRect(pHdr->hwndFrom, rowNo, colNo, LVIR_BOUNDS, &rc);
-						if (colNo == 0) 
-							rc.right = ListView_GetColumnWidth(pHdr->hwndFrom, 0);
-
-						MoveToEx(hDC, rc.left - 2, rc.top + 1, 0);
-						LineTo(hDC, rc.right - 1, rc.top + 1);
-						LineTo(hDC, rc.right - 1, rc.bottom - 2);
-						LineTo(hDC, rc.left + 1, rc.bottom - 2);
-						LineTo(hDC, rc.left + 1, rc.top);
-						DeleteObject(hPen);
-					}
+					BOOL isCurrCell = (pCustomDraw->nmcd.dwItemSpec == (DWORD)rowNo) && (pCustomDraw->iSubItem == colNo);
+					pCustomDraw->clrText = *(int*)GetProp(hWnd, TEXT("SELECTIONTEXTCOLOR"));
+					pCustomDraw->clrTextBk = *(int*)GetProp(hWnd, isCurrCell ? TEXT("CURRENTCELLCOLOR") : TEXT("SELECTIONBACKCOLOR"));
 				}
 	
 				return result;
@@ -1065,6 +1058,9 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			BOOL keepFilters = HIWORD(GetKeyState(VK_SHIFT)) && HIWORD(GetKeyState(VK_CONTROL));;
 
 			HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);
+			if (!hItem)
+				return 0;
+				
 			JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
 			JSON_Value_Type type = json_value_get_type(val);
 
@@ -1319,7 +1315,10 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hTextWnd = GetDlgItem(hTabWnd, IDC_TEXT);
 
-			HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);			
+			HTREEITEM hItem = TreeView_GetSelection(hTreeWnd);
+			if (!hItem)			
+				return 0;
+				
 			JSON_Value* val = (JSON_Value*)TreeView_GetItemParam(hTreeWnd, hItem);
 			JSON_Value_Type type = json_value_get_type(val);
 
@@ -1406,9 +1405,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				ShowWindow(GetDlgItem(hHeader, IDC_HEADER_EDIT + colNo), isFilterRow ? SW_SHOW : SW_HIDE);
 
 			// Bug fix: force Windows to redraw header
-			int w = ListView_GetColumnWidth(hGridWnd, 0);
-			ListView_SetColumnWidth(hGridWnd, 0, w + 1);
-			ListView_SetColumnWidth(hGridWnd, 0, w);			
+			SetWindowPos(hGridWnd, 0, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOMOVE);
+			SendMessage(getMainWindow(hWnd), WM_SIZE, 0, 0);			
 
 			if (isFilterRow)				
 				SendMessage(hWnd, WMU_UPDATE_FILTER_SIZE, 0, 0);											
@@ -1581,7 +1579,9 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			int backColor2 = !isDark ? getStoredValue(TEXT("back-color2"), RGB(240, 240, 240)) : getStoredValue(TEXT("back-color2-dark"), RGB(52, 52, 52));
 			int filterTextColor = !isDark ? getStoredValue(TEXT("filter-text-color"), RGB(0, 0, 0)) : getStoredValue(TEXT("filter-text-color-dark"), RGB(255, 255, 255));
 			int filterBackColor = !isDark ? getStoredValue(TEXT("filter-back-color"), RGB(240, 240, 240)) : getStoredValue(TEXT("filter-back-color-dark"), RGB(60, 60, 60));
-			int currCellColor = !isDark ? getStoredValue(TEXT("current-cell-color"), RGB(20, 250, 250)) : getStoredValue(TEXT("current-cell-color-dark"), RGB(20, 250, 250));			
+			int currCellColor = !isDark ? getStoredValue(TEXT("current-cell-back-color"), RGB(70, 96, 166)) : getStoredValue(TEXT("current-cell-back-color-dark"), RGB(32, 62, 62));
+			int selectionTextColor = !isDark ? getStoredValue(TEXT("selection-text-color"), RGB(255, 255, 255)) : getStoredValue(TEXT("selection-text-color-dark"), RGB(220, 220, 220));
+			int selectionBackColor = !isDark ? getStoredValue(TEXT("selection-back-color"), RGB(10, 36, 106)) : getStoredValue(TEXT("selection-back-color-dark"), RGB(72, 102, 102));
 			int splitterColor = !isDark ? getStoredValue(TEXT("splitter-color"), GetSysColor(COLOR_BTNFACE)) : getStoredValue(TEXT("splitter-color-dark"), GetSysColor(COLOR_BTNFACE));			
 			
 			*(int*)GetProp(hWnd, TEXT("TEXTCOLOR")) = textColor;
@@ -1590,6 +1590,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			*(int*)GetProp(hWnd, TEXT("FILTERTEXTCOLOR")) = filterTextColor;
 			*(int*)GetProp(hWnd, TEXT("FILTERBACKCOLOR")) = filterBackColor;
 			*(int*)GetProp(hWnd, TEXT("CURRENTCELLCOLOR")) = currCellColor;	
+			*(int*)GetProp(hWnd, TEXT("SELECTIONTEXTCOLOR")) = selectionTextColor;
+			*(int*)GetProp(hWnd, TEXT("SELECTIONBACKCOLOR")) = selectionBackColor;			
 			*(int*)GetProp(hWnd, TEXT("SPLITTERCOLOR")) = splitterColor;
 			
 			*(int*)GetProp(hWnd, TEXT("JSONTEXTCOLOR")) = !isDark ? getStoredValue(TEXT("json-text-color"), RGB(0, 0, 0)) : getStoredValue(TEXT("json-text-color-dark"), RGB(220, 220, 220));
