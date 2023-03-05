@@ -62,9 +62,10 @@
 
 #define SPLITTER_WIDTH         5
 #define MAX_LENGTH             4096
+#define MAX_COLUMN_COUNT       128
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("1.0.3")
+#define APP_VERSION            TEXT("1.0.4")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -774,6 +775,10 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 						0;
 					
 					JSON_Value* json = gridType == 0 || gridType == 1 ? json_value_init_array() : gridType == 2 ? json_value_init_object() : 0;
+
+					TCHAR* placeholder16 = getStoredString(TEXT("missing-attribute-value"), TEXT("N/A"));
+					char* placeholder8 = utf16to8(placeholder16);
+					free(placeholder16);
 						
 					int rowNo = ListView_GetNextItem(hGridWnd, -1, LVNI_SELECTED);
 					while (rowNo != -1) {
@@ -781,8 +786,18 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							JSON_Value* json2 = json_value_init_object();
 							for (int colNo = 0; colNo < colCount; colNo++) {
 								if (ListView_GetColumnWidth(hGridWnd, colNo)) {
-									char* value8 = utf16to8(cache[resultset[rowNo]][colNo]);
-									json_object_set_string(json_value_get_object(json2), colNames8[colNo], value8);
+									TCHAR* value16 = cache[resultset[rowNo]][colNo];
+									char* value8 = utf16to8(value16);
+
+									if (strcmp(value8, placeholder8)) {
+										if (strcmp(value8, "true") == 0 || strcmp(value8, "false") == 0)
+											json_object_set_boolean(json_value_get_object(json2), colNames8[colNo], strcmp(value8, "true") == 0);
+										else if (isNumber(value16))
+											json_object_set_number(json_value_get_object(json2), colNames8[colNo], _tcstod(value16, NULL));
+										else
+											json_object_set_string(json_value_get_object(json2), colNames8[colNo], value8);
+									}
+
 									free(value8);
 								}
 							}
@@ -790,8 +805,16 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 						}
 						
 						if (gridType == 1) {
-							char* value8 = utf16to8(cache[resultset[rowNo]][0]);
-							json_array_append_string(json_value_get_array(json), value8);
+							TCHAR* value16 = cache[resultset[rowNo]][0];
+							char* value8 = utf16to8(value16);
+
+							if (strcmp(value8, "true") == 0 || strcmp(value8, "false") == 0)
+								json_array_append_boolean(json_value_get_array(json), strcmp(value8, "true") == 0);
+							else if (isNumber(value16))
+								json_array_append_number(json_value_get_array(json), _tcstod(value16, NULL));
+							else
+								json_array_append_string(json_value_get_array(json), value8);
+
 							free(value8);
 						}
 						
@@ -818,7 +841,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 					
 					for (int colNo = 0; colNo < colCount; colNo++)
 						free(colNames8[colNo]);
-					free(colNames8);	
+					free(colNames8);
+					free(placeholder8);	
 				}
 									
 				setClipboardText(buf);
@@ -1076,15 +1100,37 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			// Columns
 			if (type == JSONArray) {
 				JSON_Array* arr = json_value_get_array(val);
-				if (json_array_get_count(arr) > 0) {
-					JSON_Value* val1 = json_array_get_value(arr, 0);
-					if (json_value_get_type(val1) == JSONObject) {
-						JSON_Object* obj = json_value_get_object(val1);
-						for (int itemNo = 0; itemNo < json_object_get_count(obj); itemNo++) {
-							TCHAR* itemName = utf8to16(json_object_get_name(obj, itemNo));
-							ListView_AddColumn(hGridWnd, itemName);
-							free(itemName);
+				int rowCount = json_array_get_count(arr);
+				if (rowCount > 0) {
+					JSON_Value* row = json_array_get_value(arr, 0);
+					if (json_value_get_type(row) == JSONObject) {
+
+						TCHAR* columns = (TCHAR*)calloc (MAX_COLUMN_COUNT * MAX_COLUMN_LENGTH, sizeof (TCHAR));
+						for (int rowNo = 0; rowNo < rowCount; rowNo++) {
+							JSON_Value* row = json_array_get_value(arr, rowNo);
+							JSON_Object* obj = json_value_get_object(row);
+							for (int itemNo = 0; itemNo < json_object_get_count(obj) && itemNo < MAX_COLUMN_COUNT; itemNo++) {
+								TCHAR* val = utf8to16(json_object_get_name(obj, itemNo));
+								TCHAR* column = (TCHAR*)calloc (_tcslen(val) + 3, sizeof (TCHAR));
+								_sntprintf(column, _tcslen(val) + 3, TEXT("~%ls~"), val);
+								if (_tcsstr(columns, column) == NULL)
+									_tcscat(columns, column);
+								free(column);
+								free(val);
+							}
+
+							if (getStoredValue(TEXT("skip-attributes-scan"), 0)) 
+								break;
 						}
+
+						TCHAR* column = _tcstok (columns, TEXT("~~"));
+						while (column != NULL) {
+							if (_tcslen(column))
+								ListView_AddColumn(hGridWnd, column);
+							column = _tcstok (NULL, TEXT("~~"));
+						}
+						
+						free(columns);
 					} else {
 						ListView_AddColumn(hGridWnd, TEXT("Element"));
 					}
@@ -1125,6 +1171,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				if (rowCount > 0) {
 					SetProp(hWnd, TEXT("CACHE"), calloc(rowCount, sizeof(TCHAR*)));
 					TCHAR*** cache = (TCHAR***)GetProp(hWnd, TEXT("CACHE"));
+					TCHAR* placeholder = getStoredString(TEXT("missing-attribute-value"), TEXT("N/A"));
+					
 
 					for (int rowNo = 0; rowNo < rowCount; rowNo++) {
 						cache[rowNo] = (TCHAR**)calloc (colCount, sizeof (TCHAR*));
@@ -1144,7 +1192,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 									cache[rowNo][colNo] = utf8to16(value8);
 									free(value8);
 								} else {
-									cache[rowNo][colNo] = calloc(1, sizeof(TCHAR));
+									cache[rowNo][colNo] = _tcsdup(placeholder);
 								}
 							}
 						} else {
@@ -1153,6 +1201,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 							free(value8);
 						}
 					} 
+
+					free(placeholder);
 				}
 			} else if (type == JSONObject) {
 				JSON_Object* obj = json_value_get_object(val);
@@ -1650,10 +1700,11 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				return TRUE;
 			}
 			
-			if (wParam == VK_ESCAPE || wParam == VK_F11 ||
+			if (wParam == VK_ESCAPE || wParam == VK_F11 || 
 				wParam == VK_F3 || wParam == VK_F5 || wParam == VK_F7 || (isCtrl && wParam == 0x46) || // Ctrl + F
 				((wParam >= 0x31 && wParam <= 0x38) && !getStoredValue(TEXT("disable-num-keys"), 0) || // 1 - 8
-				(wParam == 0x4E || wParam == 0x50) && !getStoredValue(TEXT("disable-np-keys"), 0)) && // N, P
+				(wParam == 0x4E || wParam == 0x50) && !getStoredValue(TEXT("disable-np-keys"), 0) || // N, P
+				wParam == 0x51 && getStoredValue(TEXT("exit-by-q"), 0)) && // Q
 				GetDlgCtrlID(GetFocus()) / 100 * 100 != IDC_HEADER_EDIT) { 
 				SetFocus(GetParent(hWnd));		
 				keybd_event(wParam, wParam, KEYEVENTF_EXTENDEDKEY, 0);
