@@ -1468,13 +1468,8 @@ JSON_Value * parse_value_v2(const char **string, int mode, int* isMalformed) {
 		    json_value_free(roots);
 		    res = NULL;
 		} else if (cnt == 1) {
-		    res = json_array_get_value(array, 0);
-		    
-		    // Replace by null and erase array
-		    JSON_Value* value = json_value_init_null();
-		    value->parent = json_array_get_wrapping_value(array);
-		    array->items[0] = value;
-		    json_value_free(roots);
+			res = json_value_deep_copy(json_array_get_value(array, 0));
+			json_value_free(roots);
 		} else {
 			if (isMalformed)
 				*isMalformed = 1;
