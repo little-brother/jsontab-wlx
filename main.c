@@ -66,7 +66,7 @@
 #define MAX_COLUMN_COUNT       128
 #define MAX_COLUMN_LENGTH      2000
 #define APP_NAME               TEXT("jsontab")
-#define APP_VERSION            TEXT("1.0.6")
+#define APP_VERSION            TEXT("1.0.7")
 
 #define CP_UTF16LE             1200
 #define CP_UTF16BE             1201
@@ -95,7 +95,7 @@ LRESULT CALLBACK cbNewText(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 char* json_value_get_as_string(const JSON_Value* val);
 char* json_get_path(const JSON_Value* val);
 BOOL addNode(HWND hTreeWnd, HTREEITEM hParentItem, JSON_Value* val);
-int highlightBlock(HWND hWnd, TCHAR* text, int start);
+int highlightBlock(HWND hWnd, TCHAR* text, int start, BOOL useBold);
 HWND getMainWindow(HWND hWnd);
 void setStoredValue(TCHAR* name, int value);
 int getStoredValue(TCHAR* name, int defValue);
@@ -1454,7 +1454,7 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				SendMessage(hTextWnd, EM_SETSEL, 0, -1);
 				SendMessage(hTextWnd, EM_SETCHARFORMAT, SCF_ALL, (LPARAM) &cf2);
 
-				highlightBlock(hTextWnd, text, 0);
+				highlightBlock(hTextWnd, text, 0, getStoredValue(TEXT("font-use-bold"), 0));
 				free(text);
 				SendMessage(hTextWnd, EM_SETSEL, 0, 0);
 				LockWindowUpdate(0);
@@ -1641,7 +1641,8 @@ LRESULT CALLBACK cbNewMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			*pFontSize += wParam;
 			DeleteFont(GetProp(hWnd, TEXT("FONT")));
 
-			HFONT hFont = CreateFont (*pFontSize, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, (TCHAR*)GetProp(hWnd, TEXT("FONTFAMILY")));
+			int weight = getStoredValue(TEXT("font-weight"), 0);
+			HFONT hFont = CreateFont (*pFontSize, 0, 0, 0, weight < 0 || weight > 9 ? FW_DONTCARE : weight * 100, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, (TCHAR*)GetProp(hWnd, TEXT("FONTFAMILY")));
 			HWND hTreeWnd = GetDlgItem(hWnd, IDC_TREE);
 			HWND hTabWnd = GetDlgItem(hWnd, IDC_TAB);
 			HWND hGridWnd = GetDlgItem(hTabWnd, IDC_GRID);
@@ -2049,7 +2050,7 @@ BOOL addNode(HWND hTreeWnd, HTREEITEM hParentItem, JSON_Value* val) {
 	return TRUE;
 }
 
-int highlightBlock(HWND hWnd, TCHAR* text, int start) {
+int highlightBlock(HWND hWnd, TCHAR* text, int start, BOOL useBold) {
 	int textLen = _tcslen(text);
 	if (start < 0 || start >= textLen || (text[start] != TEXT('{') && text[start] != TEXT('[')))
 		return 0;
@@ -2071,7 +2072,7 @@ int highlightBlock(HWND hWnd, TCHAR* text, int start) {
 	while (pos < textLen) {
 		TCHAR c = text[pos];		
 		if (c == TEXT('[') || c == TEXT('{')) {
-			pos += highlightBlock(hWnd, text, pos);
+			pos += highlightBlock(hWnd, text, pos, useBold);
 		} else if ((c == TEXT(']') && !isObject) || (c == TEXT('}') && isObject)) {
 			break;
 		} else if (c == TEXT('"')) {
@@ -2086,7 +2087,7 @@ int highlightBlock(HWND hWnd, TCHAR* text, int start) {
 			end++;
 
 			cf2.crTextColor = isKey ? keyColor : stringColor;
-			cf2.dwEffects = isKey ? CFM_BOLD : 0;
+			cf2.dwEffects = isKey && useBold ? CFM_BOLD : 0;
 			SendMessage(hWnd, EM_SETSEL, pos, end);
 			SendMessage(hWnd, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM) &cf2);
 
@@ -2107,7 +2108,7 @@ int highlightBlock(HWND hWnd, TCHAR* text, int start) {
 			} else if (_tcsstr(buf, TEXT("null")) == buf) {
 				cf2.crTextColor = nullColor;
 				end += 4;
-				cf2.dwEffects = CFM_BOLD;
+				cf2.dwEffects = useBold ? CFM_BOLD : 0;
 			}
 
 			SendMessage(hWnd, EM_SETSEL, pos, end);
